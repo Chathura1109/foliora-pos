@@ -2,10 +2,9 @@ package com.foliora.pos.data.local.dao
 
 import androidx.room.Dao
 import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import androidx.room.Upsert
 import com.foliora.pos.data.local.entity.SaleEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -20,7 +19,7 @@ interface SaleDao {
     /**
      * Inserts a sale record into the database.
      */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertSale(sale: SaleEntity): Long
 
     /**

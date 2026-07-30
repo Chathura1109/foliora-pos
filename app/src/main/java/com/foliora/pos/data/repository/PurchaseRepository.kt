@@ -1,5 +1,7 @@
 package com.foliora.pos.data.repository
 
+import androidx.room.withTransaction
+import com.foliora.pos.data.local.FolioraDatabase
 import com.foliora.pos.data.local.dao.ProductDao
 import com.foliora.pos.data.local.dao.PurchaseDao
 import com.foliora.pos.data.local.dao.PurchaseItemDao
@@ -13,11 +15,13 @@ import javax.inject.Inject
  * Combines operations from [PurchaseDao], [PurchaseItemDao], and [ProductDao] to coordinate complex
  * purchase workflows such as stock incrementation upon purchase order completion.
  *
+ * @property database Room database used to run multi-DAO workflows atomically.
  * @property purchaseDao Data access object for purchase transaction headers.
  * @property purchaseItemDao Data access object for purchase line items.
  * @property productDao Data access object for product inventory stock updates.
  */
 class PurchaseRepository @Inject constructor(
+    private val database: FolioraDatabase,
     private val purchaseDao: PurchaseDao,
     private val purchaseItemDao: PurchaseItemDao,
     private val productDao: ProductDao
@@ -148,7 +152,10 @@ class PurchaseRepository @Inject constructor(
      * @param items The line items included in this purchase order.
      * @return The auto-generated purchase ID.
      */
-    suspend fun completePurchase(purchase: PurchaseEntity, items: List<PurchaseItemEntity>): Long {
+    suspend fun completePurchase(
+        purchase: PurchaseEntity,
+        items: List<PurchaseItemEntity>
+    ): Long = database.withTransaction {
         val now = System.currentTimeMillis()
 
         // Step a: Insert initial purchase header into database to get generated ID
@@ -192,6 +199,6 @@ class PurchaseRepository @Inject constructor(
         )
         purchaseDao.updatePurchase(completedPurchase)
 
-        return purchaseIdLong
+        purchaseIdLong
     }
 }

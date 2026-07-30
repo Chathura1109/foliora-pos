@@ -2,10 +2,9 @@ package com.foliora.pos.data.local.dao
 
 import androidx.room.Dao
 import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import androidx.room.Upsert
 import com.foliora.pos.data.local.entity.SupplierEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -20,7 +19,7 @@ interface SupplierDao {
     /**
      * Inserts a supplier entity into the database.
      */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertSupplier(supplier: SupplierEntity): Long
 
     /**

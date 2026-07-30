@@ -2,6 +2,9 @@ package com.foliora.pos.di
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.foliora.pos.data.local.FolioraDatabase
 import com.foliora.pos.data.local.dao.*
 import dagger.Module
@@ -14,7 +17,7 @@ import javax.inject.Singleton
 /**
  * Hilt Dependency Injection module for the database layer.
  *
- * HOW HILT / DEPENDENCY INJECTION WORKS (for your viva):
+ * HOW HILT / DEPENDENCY INJECTION WORKS:
  * Instead of creating objects yourself with "val db = Room.databaseBuilder(...).build()",
  * Hilt does it for you. You tell Hilt HOW to create things (in this module), and then
  * anywhere else in the app you just say "I need a ProductDao" and Hilt hands you one.
@@ -33,6 +36,63 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
 
+    private val deletionSources = mapOf(
+        "users" to "users",
+        "categories" to "categories",
+        "products" to "products",
+        "customers" to "customers",
+        "suppliers" to "suppliers",
+        "purchases" to "purchases",
+        "purchase_items" to "purchase_items",
+        "sales" to "sales",
+        "sale_items" to "sale_items"
+    )
+
+    private fun createDeletionTriggers(database: SupportSQLiteDatabase) {
+        deletionSources.forEach { (table, collection) ->
+            database.execSQL(
+                """
+                CREATE TRIGGER IF NOT EXISTS `queue_${table}_deletion`
+                AFTER DELETE ON `$table`
+                WHEN OLD.firebaseId IS NOT NULL AND TRIM(OLD.firebaseId) != ''
+                BEGIN
+                    INSERT OR IGNORE INTO `pending_deletions` (`collection`, `firebaseId`)
+                    VALUES ('$collection', OLD.firebaseId);
+                END
+                """.trimIndent()
+            )
+        }
+    }
+
+    private val migration1To2 = object : Migration(1, 2) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `pending_deletions` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `collection` TEXT NOT NULL,
+                    `firebaseId` TEXT NOT NULL
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                `index_pending_deletions_collection_firebaseId`
+                ON `pending_deletions` (`collection`, `firebaseId`)
+                """.trimIndent()
+            )
+            createDeletionTriggers(database)
+        }
+    }
+
+    private val databaseCallback = object : RoomDatabase.Callback() {
+        override fun onCreate(database: SupportSQLiteDatabase) {
+            super.onCreate(database)
+            createDeletionTriggers(database)
+        }
+    }
+
     /**
      * Creates the single Room database instance for the whole app.
      * "foliora_database" is the filename for the SQLite database on disk.
@@ -47,6 +107,8 @@ object DatabaseModule {
             FolioraDatabase::class.java,
             "foliora_database"
         )
+            .addMigrations(migration1To2)
+            .addCallback(databaseCallback)
             // fallbackToDestructiveMigration() means: if the schema changes and there's
             // no migration defined, wipe the database and start fresh. Fine for development,
             // but in production you'd write proper migrations to preserve user data.
@@ -87,4 +149,8 @@ object DatabaseModule {
 
     @Provides
     fun provideSettingDao(database: FolioraDatabase): SettingDao = database.settingDao()
+
+    @Provides
+    fun providePendingDeletionDao(database: FolioraDatabase): PendingDeletionDao =
+        database.pendingDeletionDao()
 }
