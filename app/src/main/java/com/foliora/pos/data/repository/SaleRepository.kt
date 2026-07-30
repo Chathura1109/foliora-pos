@@ -1,5 +1,7 @@
 package com.foliora.pos.data.repository
 
+import androidx.room.withTransaction
+import com.foliora.pos.data.local.FolioraDatabase
 import com.foliora.pos.data.local.dao.ProductDao
 import com.foliora.pos.data.local.dao.SaleDao
 import com.foliora.pos.data.local.dao.SaleItemDao
@@ -13,11 +15,13 @@ import javax.inject.Inject
  * Integrates [SaleDao], [SaleItemDao], and [ProductDao] to execute checkout workflows, total revenue calculations,
  * and automatic inventory stock deduction.
  *
+ * @property database Room database used to run multi-DAO workflows atomically.
  * @property saleDao Data access object for sale transaction headers.
  * @property saleItemDao Data access object for sale line items.
  * @property productDao Data access object for product inventory stock deduction.
  */
 class SaleRepository @Inject constructor(
+    private val database: FolioraDatabase,
     private val saleDao: SaleDao,
     private val saleItemDao: SaleItemDao,
     private val productDao: ProductDao
@@ -169,7 +173,10 @@ class SaleRepository @Inject constructor(
      * @param items The line items in the cart for this sale transaction.
      * @return The auto-generated sale ID.
      */
-    suspend fun completeSale(sale: SaleEntity, items: List<SaleItemEntity>): Long {
+    suspend fun completeSale(
+        sale: SaleEntity,
+        items: List<SaleItemEntity>
+    ): Long = database.withTransaction {
         val now = System.currentTimeMillis()
 
         // Step a: Insert initial sale header into database to obtain auto-generated primary key ID
@@ -212,6 +219,6 @@ class SaleRepository @Inject constructor(
         )
         saleDao.updateSale(completedSale)
 
-        return saleIdLong
+        saleIdLong
     }
 }

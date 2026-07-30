@@ -2,10 +2,9 @@ package com.foliora.pos.data.local.dao
 
 import androidx.room.Dao
 import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import androidx.room.Upsert
 import com.foliora.pos.data.local.entity.CategoryEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -19,9 +18,9 @@ interface CategoryDao {
 
     /**
      * Inserts a category entity into the database.
-     * Replaces existing record if ID conflicts.
+     * Updates the existing record without deleting it if the ID conflicts.
      */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertCategory(category: CategoryEntity): Long
 
     /**

@@ -2,10 +2,9 @@ package com.foliora.pos.data.local.dao
 
 import androidx.room.Dao
 import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import androidx.room.Upsert
 import com.foliora.pos.data.local.entity.PurchaseItemEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -20,13 +19,13 @@ interface PurchaseItemDao {
     /**
      * Inserts a single purchase line item.
      */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertPurchaseItem(item: PurchaseItemEntity): Long
 
     /**
      * Inserts a list of purchase line items in a single batch operation.
      */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertPurchaseItems(items: List<PurchaseItemEntity>): List<Long>
 
     /**

@@ -3,14 +3,18 @@ package com.foliora.pos.data.sync
 import android.content.Context
 import android.util.Log
 import androidx.hilt.work.HiltWorker
+import androidx.room.withTransaction
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.foliora.pos.data.local.FolioraDatabase
+import com.foliora.pos.data.local.dao.PendingDeletionDao
 import com.foliora.pos.data.local.entity.*
 import com.foliora.pos.data.repository.*
 import com.google.firebase.firestore.FirebaseFirestore
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.tasks.await
+import java.util.UUID
 
 @HiltWorker
 class SyncWorker @AssistedInject constructor(
@@ -23,12 +27,21 @@ class SyncWorker @AssistedInject constructor(
     private val categoryRepository: CategoryRepository,
     private val supplierRepository: SupplierRepository,
     private val purchaseRepository: PurchaseRepository,
-    private val settingRepository: SettingRepository
+    private val settingRepository: SettingRepository,
+    private val database: FolioraDatabase,
+    private val pendingDeletionDao: PendingDeletionDao
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
         Log.d(TAG, "Starting WorkManager sync execution...")
         val firestore = FirebaseFirestore.getInstance()
+
+        try {
+            processPendingDeletions(firestore)
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not sync pending deletions: ${e.localizedMessage}", e)
+            return Result.retry()
+        }
 
         return try {
             // Push local changes to cloud first
@@ -63,67 +76,182 @@ class SyncWorker @AssistedInject constructor(
         }
     }
 
+    private suspend fun processPendingDeletions(firestore: FirebaseFirestore) {
+        for (deletion in pendingDeletionDao.getAll()) {
+            firestore.collection(deletion.collection)
+                .document(deletion.firebaseId)
+                .delete()
+                .await()
+            pendingDeletionDao.delete(deletion)
+        }
+    }
+
     // ==========================================
     // PUSH LOGIC (Local to Cloud)
     // ==========================================
 
     private suspend fun pushSales(firestore: FirebaseFirestore) {
-        for (item in saleRepository.getUnsyncedSales()) {
-            try { firestore.collection(COLLECTION_SALES).document(item.id.toString()).set(item).await(); saleRepository.updateSale(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing sale ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_SALES,
+            items = saleRepository.getUnsyncedSales(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = saleRepository::updateSale,
+            markSynced = { saleRepository.updateSale(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushSaleItems(firestore: FirebaseFirestore) {
-        for (item in saleRepository.getUnsyncedSaleItems()) {
-            try { firestore.collection(COLLECTION_SALE_ITEMS).document(item.id.toString()).set(item).await(); saleRepository.updateSaleItem(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing sale item ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_SALE_ITEMS,
+            items = saleRepository.getUnsyncedSaleItems(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = saleRepository::updateSaleItem,
+            markSynced = { saleRepository.updateSaleItem(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushProducts(firestore: FirebaseFirestore) {
-        for (item in productRepository.getUnsyncedProducts()) {
-            try { firestore.collection(COLLECTION_PRODUCTS).document(item.id.toString()).set(item).await(); productRepository.updateProduct(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing product ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_PRODUCTS,
+            items = productRepository.getUnsyncedProducts(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = productRepository::updateProduct,
+            markSynced = { productRepository.updateProduct(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushCustomers(firestore: FirebaseFirestore) {
-        for (item in customerRepository.getUnsyncedCustomers()) {
-            try { firestore.collection(COLLECTION_CUSTOMERS).document(item.id.toString()).set(item).await(); customerRepository.updateCustomer(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing customer ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_CUSTOMERS,
+            items = customerRepository.getUnsyncedCustomers(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = customerRepository::updateCustomer,
+            markSynced = { customerRepository.updateCustomer(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushUsers(firestore: FirebaseFirestore) {
-        for (item in userRepository.getUnsyncedUsers()) {
-            try { firestore.collection(COLLECTION_USERS).document(item.id.toString()).set(item).await(); userRepository.updateUser(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing user ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_USERS,
+            items = userRepository.getUnsyncedUsers(),
+            getLocalId = { it.id },
+            getFirebaseId = {
+                it.firebaseId?.takeIf(String::isNotBlank)
+                    ?: it.firebaseAuthUid.takeIf(String::isNotBlank)
+            },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = userRepository::updateUser,
+            markSynced = { userRepository.updateUser(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushCategories(firestore: FirebaseFirestore) {
-        for (item in categoryRepository.getUnsyncedCategories()) {
-            try { firestore.collection(COLLECTION_CATEGORIES).document(item.id.toString()).set(item).await(); categoryRepository.updateCategory(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing category ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_CATEGORIES,
+            items = categoryRepository.getUnsyncedCategories(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = categoryRepository::updateCategory,
+            markSynced = { categoryRepository.updateCategory(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushSuppliers(firestore: FirebaseFirestore) {
-        for (item in supplierRepository.getUnsyncedSuppliers()) {
-            try { firestore.collection(COLLECTION_SUPPLIERS).document(item.id.toString()).set(item).await(); supplierRepository.updateSupplier(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing supplier ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_SUPPLIERS,
+            items = supplierRepository.getUnsyncedSuppliers(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = supplierRepository::updateSupplier,
+            markSynced = { supplierRepository.updateSupplier(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushPurchases(firestore: FirebaseFirestore) {
-        for (item in purchaseRepository.getUnsyncedPurchases()) {
-            try { firestore.collection(COLLECTION_PURCHASES).document(item.id.toString()).set(item).await(); purchaseRepository.updatePurchase(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing purchase ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_PURCHASES,
+            items = purchaseRepository.getUnsyncedPurchases(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = purchaseRepository::updatePurchase,
+            markSynced = { purchaseRepository.updatePurchase(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushPurchaseItems(firestore: FirebaseFirestore) {
-        for (item in purchaseRepository.getUnsyncedPurchaseItems()) {
-            try { firestore.collection(COLLECTION_PURCHASE_ITEMS).document(item.id.toString()).set(item).await(); purchaseRepository.updatePurchaseItem(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing purchase item ID ${item.id}: ${e.localizedMessage}") }
-        }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_PURCHASE_ITEMS,
+            items = purchaseRepository.getUnsyncedPurchaseItems(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = purchaseRepository::updatePurchaseItem,
+            markSynced = { purchaseRepository.updatePurchaseItem(it.copy(isSynced = true)) }
+        )
     }
 
     private suspend fun pushSettings(firestore: FirebaseFirestore) {
-        for (item in settingRepository.getUnsyncedSettings()) {
-            try { firestore.collection(COLLECTION_SETTINGS).document(item.id.toString()).set(item).await(); settingRepository.updateSetting(item.copy(isSynced = true)) } catch (e: Exception) { Log.e(TAG, "Error syncing setting ID ${item.id}: ${e.localizedMessage}") }
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_SETTINGS,
+            items = settingRepository.getUnsyncedSettings(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = settingRepository::updateSetting,
+            markSynced = { settingRepository.updateSetting(it.copy(isSynced = true)) }
+        )
+    }
+
+    private suspend fun <T : Any> pushCollection(
+        firestore: FirebaseFirestore,
+        collection: String,
+        items: List<T>,
+        getLocalId: (T) -> Int,
+        getFirebaseId: (T) -> String?,
+        withFirebaseId: (T, String) -> T,
+        persistAssignedId: suspend (T) -> Unit,
+        markSynced: suspend (T) -> Unit
+    ) {
+        for (item in items) {
+            try {
+                val existingFirebaseId = getFirebaseId(item)?.takeIf(String::isNotBlank)
+                val documentId = existingFirebaseId ?: UUID.randomUUID().toString()
+                val itemWithFirebaseId = withFirebaseId(item, documentId)
+
+                if (existingFirebaseId == null) {
+                    persistAssignedId(itemWithFirebaseId)
+                }
+
+                firestore.collection(collection).document(documentId).set(itemWithFirebaseId).await()
+                markSynced(itemWithFirebaseId)
+            } catch (e: Exception) {
+                Log.e(
+                    TAG,
+                    "Error syncing $collection local ID ${getLocalId(item)}: ${e.localizedMessage}",
+                    e
+                )
+            }
         }
     }
 
@@ -132,43 +260,55 @@ class SyncWorker @AssistedInject constructor(
     // ==========================================
 
     private suspend fun pullSales(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SALES).get().await().documents) { doc.toObject(SaleEntity::class.java)?.let { saleRepository.insertSale(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling sales: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SALES).get().await().documents) { doc.toObject(SaleEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALES, doc.id) { saleRepository.insertSale(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sales: ${e.localizedMessage}") }
     }
 
     private suspend fun pullSaleItems(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SALE_ITEMS).get().await().documents) { doc.toObject(SaleItemEntity::class.java)?.let { saleRepository.insertSaleItem(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling sale items: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SALE_ITEMS).get().await().documents) { doc.toObject(SaleItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALE_ITEMS, doc.id) { saleRepository.insertSaleItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sale items: ${e.localizedMessage}") }
     }
 
     private suspend fun pullProducts(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PRODUCTS).get().await().documents) { doc.toObject(ProductEntity::class.java)?.let { productRepository.insertProduct(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling products: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_PRODUCTS).get().await().documents) { doc.toObject(ProductEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PRODUCTS, doc.id) { productRepository.insertProduct(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling products: ${e.localizedMessage}") }
     }
 
     private suspend fun pullCustomers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_CUSTOMERS).get().await().documents) { doc.toObject(CustomerEntity::class.java)?.let { customerRepository.insertCustomer(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling customers: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_CUSTOMERS).get().await().documents) { doc.toObject(CustomerEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CUSTOMERS, doc.id) { customerRepository.insertCustomer(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling customers: ${e.localizedMessage}") }
     }
 
     private suspend fun pullUsers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_USERS).get().await().documents) { doc.toObject(UserEntity::class.java)?.let { userRepository.insertUser(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling users: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_USERS).get().await().documents) { doc.toObject(UserEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_USERS, doc.id) { userRepository.insertUser(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling users: ${e.localizedMessage}") }
     }
 
     private suspend fun pullCategories(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_CATEGORIES).get().await().documents) { doc.toObject(CategoryEntity::class.java)?.let { categoryRepository.insertCategory(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling categories: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_CATEGORIES).get().await().documents) { doc.toObject(CategoryEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CATEGORIES, doc.id) { categoryRepository.insertCategory(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling categories: ${e.localizedMessage}") }
     }
 
     private suspend fun pullSuppliers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SUPPLIERS).get().await().documents) { doc.toObject(SupplierEntity::class.java)?.let { supplierRepository.insertSupplier(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling suppliers: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SUPPLIERS).get().await().documents) { doc.toObject(SupplierEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SUPPLIERS, doc.id) { supplierRepository.insertSupplier(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling suppliers: ${e.localizedMessage}") }
     }
 
     private suspend fun pullPurchases(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PURCHASES).get().await().documents) { doc.toObject(PurchaseEntity::class.java)?.let { purchaseRepository.insertPurchase(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchases: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_PURCHASES).get().await().documents) { doc.toObject(PurchaseEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASES, doc.id) { purchaseRepository.insertPurchase(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchases: ${e.localizedMessage}") }
     }
 
     private suspend fun pullPurchaseItems(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PURCHASE_ITEMS).get().await().documents) { doc.toObject(PurchaseItemEntity::class.java)?.let { purchaseRepository.insertPurchaseItem(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchase items: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_PURCHASE_ITEMS).get().await().documents) { doc.toObject(PurchaseItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASE_ITEMS, doc.id) { purchaseRepository.insertPurchaseItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchase items: ${e.localizedMessage}") }
     }
 
     private suspend fun pullSettings(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SETTINGS).get().await().documents) { doc.toObject(SettingEntity::class.java)?.let { settingRepository.insertSetting(it.copy(isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling settings: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SETTINGS).get().await().documents) { doc.toObject(SettingEntity::class.java)?.let { settingRepository.insertSetting(it.copy(firebaseId = doc.id, isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling settings: ${e.localizedMessage}") }
+    }
+
+    private suspend fun insertPulledIfNotPending(
+        collection: String,
+        firebaseId: String,
+        insert: suspend () -> Unit
+    ) {
+        database.withTransaction {
+            if (!pendingDeletionDao.exists(collection, firebaseId)) {
+                insert()
+            }
+        }
     }
 
     companion object {

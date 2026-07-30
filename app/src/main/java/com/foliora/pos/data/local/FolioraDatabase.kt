@@ -32,9 +32,10 @@ import com.foliora.pos.data.local.entity.*
         PurchaseItemEntity::class,
         SaleEntity::class,
         SaleItemEntity::class,
-        SettingEntity::class
+        SettingEntity::class,
+        PendingDeletionEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false // Set to true in production for migration tracking
 )
 abstract class FolioraDatabase : RoomDatabase() {
@@ -50,4 +51,5 @@ abstract class FolioraDatabase : RoomDatabase() {
     abstract fun saleDao(): SaleDao
     abstract fun saleItemDao(): SaleItemDao
     abstract fun settingDao(): SettingDao
+    abstract fun pendingDeletionDao(): PendingDeletionDao
 }
