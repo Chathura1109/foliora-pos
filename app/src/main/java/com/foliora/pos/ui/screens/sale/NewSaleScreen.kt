@@ -119,7 +119,7 @@ fun NewSaleScreen(
         onSelectCustomer = { customer -> viewModel.selectCustomer(customer) },
         onSelectPaymentMethod = { method -> viewModel.setPaymentMethod(method) },
         onSelectSaleStatus = { status -> viewModel.setSaleStatus(status) },
-        onCheckout = { viewModel.checkout(cashierId = 1, onSuccess = onCheckoutSuccess) },
+        onCheckout = { viewModel.checkout(onSuccess = onCheckoutSuccess) },
         onDismissError = { viewModel.clearErrorMessage() }
     )
 }

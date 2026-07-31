@@ -106,7 +106,7 @@ fun NewPurchaseScreen(
         onRemoveFromCart = { product -> viewModel.removeFromCart(product) },
         onUpdateQuantity = { product, qty -> viewModel.updateQuantity(product, qty) },
         onSelectSupplier = { supplier -> viewModel.selectSupplier(supplier) },
-        onCheckout = { viewModel.checkout(userId = 1, onSuccess = onCheckoutSuccess) },
+        onCheckout = { viewModel.checkout(onSuccess = onCheckoutSuccess) },
         onDismissError = { viewModel.clearErrorMessage() }
     )
 }

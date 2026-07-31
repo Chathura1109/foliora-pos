@@ -4,11 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.foliora.pos.data.local.entity.CustomerEntity
 import com.foliora.pos.data.repository.CustomerRepository
+import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -46,7 +46,7 @@ class CustomerViewModel @Inject constructor(
         address: String,
         notes: String? = null
     ) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to add customer") {
             val customer = CustomerEntity(
                 name = name.trim(),
                 phoneNumber = phoneNumber.trim(),
@@ -63,7 +63,7 @@ class CustomerViewModel @Inject constructor(
      * @param customer Updated [CustomerEntity] instance.
      */
     fun updateCustomer(customer: CustomerEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to update customer") {
             repository.updateCustomer(customer)
         }
     }
@@ -74,7 +74,7 @@ class CustomerViewModel @Inject constructor(
      * @param customer [CustomerEntity] instance to delete.
      */
     fun deleteCustomer(customer: CustomerEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to delete customer") {
             repository.deleteCustomer(customer)
         }
     }

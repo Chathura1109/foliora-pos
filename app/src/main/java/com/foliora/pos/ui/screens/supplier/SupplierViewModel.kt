@@ -4,13 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.foliora.pos.data.local.entity.SupplierEntity
 import com.foliora.pos.data.repository.SupplierRepository
+import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -55,7 +55,7 @@ class SupplierViewModel @Inject constructor(
         latitude: Double? = null,
         longitude: Double? = null
     ) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to add supplier", onError = { _errorMessage.value = it }) {
             val supplier = SupplierEntity(
                 name = name.trim(),
                 phoneNumber = phoneNumber.trim(),
@@ -74,7 +74,7 @@ class SupplierViewModel @Inject constructor(
      * @param supplier Supplier entity instance to insert.
      */
     fun addSupplier(supplier: SupplierEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to add supplier", onError = { _errorMessage.value = it }) {
             repository.insertSupplier(supplier)
         }
     }
@@ -85,7 +85,7 @@ class SupplierViewModel @Inject constructor(
      * @param supplier Updated supplier entity instance.
      */
     fun updateSupplier(supplier: SupplierEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to update supplier", onError = { _errorMessage.value = it }) {
             repository.updateSupplier(supplier)
         }
     }
@@ -96,12 +96,8 @@ class SupplierViewModel @Inject constructor(
      * @param supplier Supplier entity instance to delete.
      */
     fun deleteSupplier(supplier: SupplierEntity) {
-        viewModelScope.launch {
-            try {
-                repository.deleteSupplier(supplier)
-            } catch (e: Exception) {
-                _errorMessage.value = e.localizedMessage ?: "Unable to delete supplier"
-            }
+        launchCrudCatching("Unable to delete supplier", onError = { _errorMessage.value = it }) {
+            repository.deleteSupplier(supplier)
         }
     }
 

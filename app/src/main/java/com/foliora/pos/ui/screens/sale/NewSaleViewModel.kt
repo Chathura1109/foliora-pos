@@ -10,7 +10,7 @@ import com.foliora.pos.data.repository.CustomerRepository
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.SaleRepository
 import com.foliora.pos.data.repository.UserRepository
-import com.foliora.pos.data.local.entity.UserEntity
+import com.google.firebase.auth.FirebaseAuth
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -54,6 +54,8 @@ class NewSaleViewModel @Inject constructor(
     private val saleRepository: SaleRepository,
     private val userRepository: UserRepository
 ) : ViewModel() {
+
+    private val firebaseAuth = FirebaseAuth.getInstance()
 
     /**
      * Active products available in inventory for selection.
@@ -243,10 +245,9 @@ class NewSaleViewModel @Inject constructor(
      * 3. Calls `saleRepository.completeSale` to persist transaction and deduct inventory stock.
      * 4. Invokes [onSuccess] callback upon completion.
      *
-     * @param cashierId The ID of the logged-in user completing the sale (default is 1).
      * @param onSuccess Callback triggered on successful database transaction.
      */
-    fun checkout(cashierId: Int = 1, onSuccess: () -> Unit = {}) {
+    fun checkout(onSuccess: () -> Unit = {}) {
         val currentCart = _cartItems.value
         if (currentCart.isEmpty()) {
             _errorMessage.value = "Cart is empty. Please add items to checkout."
@@ -256,6 +257,16 @@ class NewSaleViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
+                val firebaseUser = checkNotNull(firebaseAuth.currentUser) {
+                    "You must be logged in to complete a sale"
+                }
+                val cashier = checkNotNull(
+                    userRepository.getUserByFirebaseUid(firebaseUser.uid)
+                ) {
+                    "Your user profile is unavailable. Sign in again"
+                }
+                check(cashier.isActive) { "Your user account is inactive" }
+
                 val currentTime = System.currentTimeMillis()
                 val grandTotal = currentCart.sumOf { it.subtotal }
 
@@ -263,7 +274,7 @@ class NewSaleViewModel @Inject constructor(
                 val sale = SaleEntity(
                     id = 0,
                     customerId = _selectedCustomer.value?.id,
-                    cashierId = cashierId,
+                    cashierId = cashier.id,
                     date = currentTime,
                     totalAmount = grandTotal,
                     paymentMethod = _paymentMethod.value,
@@ -287,20 +298,6 @@ class NewSaleViewModel @Inject constructor(
                         firebaseId = null,
                         createdAt = currentTime,
                         updatedAt = currentTime
-                    )
-                }
-
-                // Execute sequential database save & stock deduction
-                // Workaround for FK constraint until Phase 9: Ensure a dummy user exists
-                val cashier = userRepository.getUserById(cashierId)
-                if (cashier == null) {
-                    userRepository.insertUser(
-                        UserEntity(
-                            id = cashierId,
-                            name = "Dummy Cashier",
-                            role = "CASHIER",
-                            firebaseAuthUid = "dummy_uid"
-                        )
                     )
                 }
 

@@ -9,12 +9,12 @@ import com.foliora.pos.data.local.entity.SupplierEntity
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.PurchaseRepository
 import com.foliora.pos.data.repository.SupplierRepository
+import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -69,7 +69,7 @@ class PurchasesViewModel @Inject constructor(
      * @param purchase The [PurchaseEntity] instance to delete.
      */
     fun deletePurchase(purchase: PurchaseEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to delete purchase") {
             purchaseRepository.deletePurchase(purchase)
         }
     }

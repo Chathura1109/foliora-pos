@@ -4,13 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.foliora.pos.data.local.entity.CategoryEntity
 import com.foliora.pos.data.repository.CategoryRepository
+import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -43,7 +43,7 @@ class CategoryViewModel @Inject constructor(
      * @param description Optional description for the category.
      */
     fun addCategory(name: String, description: String?) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to add category", onError = { _errorMessage.value = it }) {
             val category = CategoryEntity(
                 name = name.trim(),
                 description = description?.trim()?.ifEmpty { null }
@@ -58,7 +58,7 @@ class CategoryViewModel @Inject constructor(
      * @param category Updated category entity instance.
      */
     fun updateCategory(category: CategoryEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to update category", onError = { _errorMessage.value = it }) {
             repository.updateCategory(category)
         }
     }
@@ -69,12 +69,8 @@ class CategoryViewModel @Inject constructor(
      * @param category Category entity to be removed.
      */
     fun deleteCategory(category: CategoryEntity) {
-        viewModelScope.launch {
-            try {
-                repository.deleteCategory(category)
-            } catch (e: Exception) {
-                _errorMessage.value = e.localizedMessage ?: "Unable to delete category"
-            }
+        launchCrudCatching("Unable to delete category", onError = { _errorMessage.value = it }) {
+            repository.deleteCategory(category)
         }
     }
 
