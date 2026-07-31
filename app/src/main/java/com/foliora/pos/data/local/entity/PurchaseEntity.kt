@@ -16,7 +16,7 @@ import androidx.room.PrimaryKey
             entity = SupplierEntity::class,
             parentColumns = ["id"],
             childColumns = ["supplierId"],
-            onDelete = ForeignKey.CASCADE
+            onDelete = ForeignKey.RESTRICT
         ),
         ForeignKey(
             entity = UserEntity::class,

@@ -33,6 +33,10 @@ class CategoryRepository @Inject constructor(
      * Deletes a category entity from the database.
      */
     suspend fun deleteCategory(category: CategoryEntity) {
+        val productCount = categoryDao.getProductCount(category.id)
+        require(productCount == 0) {
+            "Move or delete the $productCount product(s) in ${category.name} before deleting this category"
+        }
         categoryDao.deleteCategory(category)
     }
 

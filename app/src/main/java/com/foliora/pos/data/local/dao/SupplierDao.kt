@@ -35,6 +35,12 @@ interface SupplierDao {
     suspend fun deleteSupplier(supplier: SupplierEntity): Int
 
     /**
+     * Counts purchase records that still reference a supplier.
+     */
+    @Query("SELECT COUNT(*) FROM purchases WHERE supplierId = :supplierId")
+    suspend fun getPurchaseCount(supplierId: Int): Int
+
+    /**
      * Retrieves a single supplier by unique supplier ID.
      */
     @Query("SELECT * FROM suppliers WHERE id = :id")

@@ -36,6 +36,12 @@ interface CategoryDao {
     suspend fun deleteCategory(category: CategoryEntity): Int
 
     /**
+     * Counts products that still belong to a category.
+     */
+    @Query("SELECT COUNT(*) FROM products WHERE categoryId = :categoryId")
+    suspend fun getProductCount(categoryId: Int): Int
+
+    /**
      * Fetches a category by its local primary key ID.
      */
     @Query("SELECT * FROM categories WHERE id = :id")

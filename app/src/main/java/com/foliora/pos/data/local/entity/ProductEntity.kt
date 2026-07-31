@@ -16,7 +16,7 @@ import androidx.room.PrimaryKey
             entity = CategoryEntity::class,
             parentColumns = ["id"],
             childColumns = ["categoryId"],
-            onDelete = ForeignKey.CASCADE
+            onDelete = ForeignKey.RESTRICT
         )
     ],
     indices = [

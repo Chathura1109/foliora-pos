@@ -1,5 +1,6 @@
 package com.foliora.pos.data.repository
 
+import android.database.sqlite.SQLiteConstraintException
 import com.foliora.pos.data.local.dao.ProductDao
 import com.foliora.pos.data.local.entity.ProductEntity
 import kotlinx.coroutines.flow.Flow
@@ -33,7 +34,14 @@ class ProductRepository @Inject constructor(
      * Deletes a product entity from the database.
      */
     suspend fun deleteProduct(product: ProductEntity) {
-        productDao.deleteProduct(product)
+        try {
+            productDao.deleteProduct(product)
+        } catch (e: SQLiteConstraintException) {
+            throw IllegalStateException(
+                "${product.name} cannot be deleted because it is used in sales or purchase history",
+                e
+            )
+        }
     }
 
     /**

@@ -5,8 +5,10 @@ import androidx.lifecycle.viewModelScope
 import com.foliora.pos.data.local.entity.SupplierEntity
 import com.foliora.pos.data.repository.SupplierRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -21,6 +23,9 @@ import javax.inject.Inject
 class SupplierViewModel @Inject constructor(
     private val repository: SupplierRepository
 ) : ViewModel() {
+
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
     /**
      * Exposes all suppliers in the database ordered alphabetically by name as a StateFlow.
@@ -92,7 +97,15 @@ class SupplierViewModel @Inject constructor(
      */
     fun deleteSupplier(supplier: SupplierEntity) {
         viewModelScope.launch {
-            repository.deleteSupplier(supplier)
+            try {
+                repository.deleteSupplier(supplier)
+            } catch (e: Exception) {
+                _errorMessage.value = e.localizedMessage ?: "Unable to delete supplier"
+            }
         }
+    }
+
+    fun clearErrorMessage() {
+        _errorMessage.value = null
     }
 }

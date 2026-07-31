@@ -39,9 +39,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,9 +76,12 @@ fun SupplierScreen(
     viewModel: SupplierViewModel = hiltViewModel()
 ) {
     val suppliers by viewModel.suppliers.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
 
     SupplierScreenContent(
         suppliers = suppliers,
+        errorMessage = errorMessage,
+        onErrorShown = viewModel::clearErrorMessage,
         onBackClick = onBackClick,
         onAddSupplier = { name, phone, address, notes, lat, lng ->
             viewModel.addSupplier(name, phone, address, notes, lat, lng)
@@ -97,6 +103,8 @@ fun SupplierScreen(
 @Composable
 fun SupplierScreenContent(
     suppliers: List<SupplierEntity>,
+    errorMessage: String?,
+    onErrorShown: () -> Unit,
     onBackClick: (() -> Unit)?,
     onAddSupplier: (name: String, phone: String, address: String, notes: String?, lat: Double?, lng: Double?) -> Unit,
     onUpdateSupplier: (SupplierEntity) -> Unit,
@@ -106,9 +114,18 @@ fun SupplierScreenContent(
     var isAddEditDialogVisible by remember { mutableStateOf(false) }
     var supplierToEdit by remember { mutableStateOf<SupplierEntity?>(null) }
     var supplierToDelete by remember { mutableStateOf<SupplierEntity?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(errorMessage) {
+        errorMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            onErrorShown()
+        }
+    }
 
     Scaffold(
         modifier = modifier,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             FolioraTopAppBar(
                 title = "Suppliers",
