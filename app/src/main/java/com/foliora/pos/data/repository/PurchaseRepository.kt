@@ -187,7 +187,7 @@ class PurchaseRepository @Inject constructor(
             val product = productDao.getProductById(item.productId)
             if (product != null) {
                 val newStockQuantity = product.stockQuantity + item.quantity
-                productDao.updateStockQuantity(product.id, newStockQuantity)
+                productDao.updateStockQuantity(product.id, newStockQuantity, now)
             }
         }
 

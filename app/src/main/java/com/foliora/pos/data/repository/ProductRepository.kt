@@ -82,7 +82,7 @@ class ProductRepository @Inject constructor(
      * Directly updates the stock quantity of a specified product.
      */
     suspend fun updateStockQuantity(productId: Int, newQuantity: Double) {
-        productDao.updateStockQuantity(productId, newQuantity)
+        productDao.updateStockQuantity(productId, newQuantity, System.currentTimeMillis())
     }
 
     /**
