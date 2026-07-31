@@ -8,6 +8,7 @@ import com.foliora.pos.data.local.FolioraDatabase
 import com.foliora.pos.data.local.dao.PendingDeletionDao
 import com.foliora.pos.data.local.entity.*
 import com.foliora.pos.data.repository.*
+import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -51,7 +52,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     private fun loadSettings() {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to load settings", onError = { _syncStatus.value = it }) {
             val currentSettings = settingRepository.initializeSettings()
             _settings.value = currentSettings
         }
@@ -63,7 +64,7 @@ class SettingsViewModel @Inject constructor(
         phone: String,
         receiptMessage: String
     ) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to save settings", onError = { _syncStatus.value = it }) {
             val current = _settings.value ?: settingRepository.initializeSettings()
             val updated = current.copy(
                 shopName = shopName.trim(),

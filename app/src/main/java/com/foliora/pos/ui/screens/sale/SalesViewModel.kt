@@ -10,6 +10,7 @@ import com.foliora.pos.data.repository.CustomerRepository
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.SaleRepository
 import com.foliora.pos.data.repository.UserRepository
+import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import com.google.firebase.auth.FirebaseAuth
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -94,7 +95,7 @@ class SalesViewModel @Inject constructor(
      * @param sale The [SaleEntity] instance to delete.
      */
     fun deleteSale(sale: SaleEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to delete sale") {
             saleRepository.deleteSale(sale)
         }
     }
@@ -103,7 +104,7 @@ class SalesViewModel @Inject constructor(
      * Marks a pending sale as PAID.
      */
     fun markSaleAsPaid(sale: SaleEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to mark sale as paid") {
             val updatedSale = sale.copy(
                 status = "PAID",
                 isSynced = false

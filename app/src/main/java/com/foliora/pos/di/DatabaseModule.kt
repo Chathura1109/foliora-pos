@@ -22,7 +22,7 @@ import javax.inject.Singleton
  * Hilt does it for you. You tell Hilt HOW to create things (in this module), and then
  * anywhere else in the app you just say "I need a ProductDao" and Hilt hands you one.
  *
- * Why bother? Because:
+ * Because:
  *   1. The database should only be created ONCE (Singleton) — Hilt guarantees this.
  *   2. Your ViewModels and Repositories don't need to know HOW the database is built.
  *   3. It makes testing easier — you can swap in a fake database for tests.
@@ -82,6 +82,131 @@ object DatabaseModule {
                 ON `pending_deletions` (`collection`, `firebaseId`)
                 """.trimIndent()
             )
+            createDeletionTriggers(database)
+        }
+    }
+
+    private val migration2To3 = object : Migration(2, 3) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE `products_backup` AS
+                SELECT `id`, `categoryId`, `name`, `buyingPrice`, `sellingPrice`,
+                       `stockQuantity`, `unit`, `lowStockLimit`, `photoPath`, `notes`,
+                       `isActive`, `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `products`
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE `sale_items_backup` AS
+                SELECT `id`, `saleId`, `productId`, `quantity`, `sellingPrice`, `subtotal`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `sale_items`
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE `purchase_items_backup` AS
+                SELECT `id`, `purchaseId`, `productId`, `quantity`, `buyingPrice`, `subtotal`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `purchase_items`
+                """.trimIndent()
+            )
+            database.execSQL("DROP TABLE `sale_items`")
+            database.execSQL("DROP TABLE `purchase_items`")
+            database.execSQL("DROP TABLE `products`")
+            database.execSQL(
+                """
+                CREATE TABLE `products` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `categoryId` INTEGER NOT NULL,
+                    `name` TEXT NOT NULL,
+                    `buyingPrice` REAL NOT NULL,
+                    `sellingPrice` REAL NOT NULL,
+                    `stockQuantity` REAL NOT NULL,
+                    `unit` TEXT NOT NULL,
+                    `lowStockLimit` REAL NOT NULL,
+                    `photoPath` TEXT,
+                    `notes` TEXT,
+                    `isActive` INTEGER NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`categoryId`) REFERENCES `categories`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                INSERT INTO `products`
+                SELECT `id`, `categoryId`, `name`, `buyingPrice`, `sellingPrice`,
+                       `stockQuantity`, `unit`, `lowStockLimit`, `photoPath`, `notes`,
+                       `isActive`, `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `products_backup`
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE `sale_items` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `saleId` INTEGER NOT NULL,
+                    `productId` INTEGER NOT NULL,
+                    `quantity` REAL NOT NULL,
+                    `sellingPrice` REAL NOT NULL,
+                    `subtotal` REAL NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`saleId`) REFERENCES `sales`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                    FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                INSERT INTO `sale_items`
+                SELECT `id`, `saleId`, `productId`, `quantity`, `sellingPrice`, `subtotal`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `sale_items_backup`
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE `purchase_items` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `purchaseId` INTEGER NOT NULL,
+                    `productId` INTEGER NOT NULL,
+                    `quantity` REAL NOT NULL,
+                    `buyingPrice` REAL NOT NULL,
+                    `subtotal` REAL NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`purchaseId`) REFERENCES `purchases`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                    FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                INSERT INTO `purchase_items`
+                SELECT `id`, `purchaseId`, `productId`, `quantity`, `buyingPrice`, `subtotal`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `purchase_items_backup`
+                """.trimIndent()
+            )
+            database.execSQL("DROP TABLE `products_backup`")
+            database.execSQL("DROP TABLE `sale_items_backup`")
+            database.execSQL("DROP TABLE `purchase_items_backup`")
+            database.execSQL("CREATE INDEX `index_products_categoryId` ON `products` (`categoryId`)")
+            database.execSQL("CREATE INDEX `index_sale_items_saleId` ON `sale_items` (`saleId`)")
+            database.execSQL("CREATE INDEX `index_sale_items_productId` ON `sale_items` (`productId`)")
+            database.execSQL("CREATE INDEX `index_purchase_items_purchaseId` ON `purchase_items` (`purchaseId`)")
+            database.execSQL("CREATE INDEX `index_purchase_items_productId` ON `purchase_items` (`productId`)")
             createDeletionTriggers(database)
         }
     }
@@ -194,12 +319,8 @@ object DatabaseModule {
             FolioraDatabase::class.java,
             "foliora_database"
         )
-            .addMigrations(migration1To2, migration3To4)
+            .addMigrations(migration1To2, migration2To3, migration3To4)
             .addCallback(databaseCallback)
-            // fallbackToDestructiveMigration() means: if the schema changes and there's
-            // no migration defined, wipe the database and start fresh. Fine for development,
-            // but in production you'd write proper migrations to preserve user data.
-            .fallbackToDestructiveMigration()
             .build()
     }
 

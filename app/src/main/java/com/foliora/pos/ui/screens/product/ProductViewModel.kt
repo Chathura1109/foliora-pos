@@ -7,6 +7,7 @@ import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.repository.CategoryRepository
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.UserRepository
+import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import com.google.firebase.auth.FirebaseAuth
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -98,7 +99,7 @@ class ProductViewModel @Inject constructor(
         photoPath: String? = null,
         notes: String? = null
     ) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to add product", onError = { _errorMessage.value = it }) {
             val currentTime = System.currentTimeMillis()
             val newProduct = ProductEntity(
                 categoryId = categoryId,
@@ -124,7 +125,7 @@ class ProductViewModel @Inject constructor(
      * Inserts a complete [ProductEntity] object into the repository.
      */
     fun addProduct(product: ProductEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to add product", onError = { _errorMessage.value = it }) {
             productRepository.insertProduct(
                 product.copy(
                     isSynced = false,
@@ -141,7 +142,7 @@ class ProductViewModel @Inject constructor(
      * @param product Product entity containing updated fields.
      */
     fun updateProduct(product: ProductEntity) {
-        viewModelScope.launch {
+        launchCrudCatching("Unable to update product", onError = { _errorMessage.value = it }) {
             productRepository.updateProduct(
                 product.copy(
                     isSynced = false,
@@ -157,12 +158,8 @@ class ProductViewModel @Inject constructor(
      * @param product Product entity to delete.
      */
     fun deleteProduct(product: ProductEntity) {
-        viewModelScope.launch {
-            try {
-                productRepository.deleteProduct(product)
-            } catch (e: Exception) {
-                _errorMessage.value = e.localizedMessage ?: "Unable to delete product"
-            }
+        launchCrudCatching("Unable to delete product", onError = { _errorMessage.value = it }) {
+            productRepository.deleteProduct(product)
         }
     }
 

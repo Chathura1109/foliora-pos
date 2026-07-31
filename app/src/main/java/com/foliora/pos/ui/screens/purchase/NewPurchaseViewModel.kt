@@ -6,11 +6,11 @@ import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.PurchaseEntity
 import com.foliora.pos.data.local.entity.PurchaseItemEntity
 import com.foliora.pos.data.local.entity.SupplierEntity
-import com.foliora.pos.data.local.entity.UserEntity
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.PurchaseRepository
 import com.foliora.pos.data.repository.SupplierRepository
 import com.foliora.pos.data.repository.UserRepository
+import com.google.firebase.auth.FirebaseAuth
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,6 +57,8 @@ class NewPurchaseViewModel @Inject constructor(
     private val purchaseRepository: PurchaseRepository,
     private val userRepository: UserRepository
 ) : ViewModel() {
+
+    private val firebaseAuth = FirebaseAuth.getInstance()
 
     /**
      * Active products available in inventory for selection and restocking.
@@ -216,15 +218,14 @@ class NewPurchaseViewModel @Inject constructor(
     /**
      * Completes the restocking purchase order:
      * 1. Validates that a supplier is selected and cart is not empty.
-     * 2. Checks [UserRepository] for existing creator user ID; inserts dummy user ID 1 if missing (prevents FK failures).
+     * 2. Resolves the authenticated Firebase account to its local user record.
      * 3. Creates [PurchaseEntity] header and maps cart items to [PurchaseItemEntity] instances.
      * 4. Invokes `purchaseRepository.completePurchase(purchase, items)` to save order and increment inventory stock.
      * 5. Triggers [onSuccess] callback upon completion.
      *
-     * @param userId User ID of the creator/manager completing the purchase order (default 1).
      * @param onSuccess Callback triggered after successful transaction completion.
      */
-    fun checkout(userId: Int = 1, onSuccess: () -> Unit = {}) {
+    fun checkout(onSuccess: () -> Unit = {}) {
         val currentCart = _cartItems.value
         val supplier = _selectedSupplier.value
 
@@ -241,21 +242,18 @@ class NewPurchaseViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 _isProcessing.value = true
+                val firebaseUser = checkNotNull(firebaseAuth.currentUser) {
+                    "You must be logged in to complete a purchase"
+                }
+                val creator = checkNotNull(
+                    userRepository.getUserByFirebaseUid(firebaseUser.uid)
+                ) {
+                    "Your user profile is unavailable. Sign in again"
+                }
+                check(creator.isActive) { "Your user account is inactive" }
+
                 val currentTime = System.currentTimeMillis()
                 val grandTotal = currentCart.sumOf { it.subtotal }
-
-                // Foreign Key Safety Workaround: Ensure creator user exists in UserRepository
-                val existingUser = userRepository.getUserById(userId)
-                if (existingUser == null) {
-                    userRepository.insertUser(
-                        UserEntity(
-                            id = userId,
-                            name = "Default Manager",
-                            role = "ADMIN",
-                            firebaseAuthUid = "dummy_manager_uid"
-                        )
-                    )
-                }
 
                 // Create Purchase header record
                 val purchase = PurchaseEntity(
@@ -264,7 +262,7 @@ class NewPurchaseViewModel @Inject constructor(
                     date = currentTime,
                     totalCost = grandTotal,
                     status = "COMPLETED",
-                    createdBy = userId,
+                    createdBy = creator.id,
                     isSynced = false,
                     firebaseId = null,
                     createdAt = currentTime,
