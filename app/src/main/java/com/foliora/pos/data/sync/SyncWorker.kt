@@ -13,6 +13,7 @@ import com.foliora.pos.data.repository.*
 import com.google.firebase.firestore.FirebaseFirestore
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.tasks.await
 import java.util.UUID
 
@@ -38,6 +39,8 @@ class SyncWorker @AssistedInject constructor(
 
         try {
             processPendingDeletions(firestore)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Could not sync pending deletions: ${e.localizedMessage}", e)
             return Result.retry()
@@ -70,9 +73,11 @@ class SyncWorker @AssistedInject constructor(
 
             Log.d(TAG, "WorkManager sync completed successfully.")
             Result.success()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Fatal failure during sync execution: ${e.localizedMessage}", e)
-            Result.success()
+            Result.retry()
         }
     }
 
@@ -251,6 +256,7 @@ class SyncWorker @AssistedInject constructor(
                     "Error syncing $collection local ID ${getLocalId(item)}: ${e.localizedMessage}",
                     e
                 )
+                throw e
             }
         }
     }
@@ -260,43 +266,43 @@ class SyncWorker @AssistedInject constructor(
     // ==========================================
 
     private suspend fun pullSales(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SALES).get().await().documents) { doc.toObject(SaleEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALES, doc.id) { saleRepository.insertSale(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sales: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SALES).get().await().documents) { doc.toObject(SaleEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALES, doc.id) { saleRepository.insertSale(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sales: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullSaleItems(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SALE_ITEMS).get().await().documents) { doc.toObject(SaleItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALE_ITEMS, doc.id) { saleRepository.insertSaleItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sale items: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SALE_ITEMS).get().await().documents) { doc.toObject(SaleItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALE_ITEMS, doc.id) { saleRepository.insertSaleItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sale items: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullProducts(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PRODUCTS).get().await().documents) { doc.toObject(ProductEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PRODUCTS, doc.id) { productRepository.insertProduct(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling products: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_PRODUCTS).get().await().documents) { doc.toObject(ProductEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PRODUCTS, doc.id) { productRepository.insertProduct(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling products: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullCustomers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_CUSTOMERS).get().await().documents) { doc.toObject(CustomerEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CUSTOMERS, doc.id) { customerRepository.insertCustomer(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling customers: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_CUSTOMERS).get().await().documents) { doc.toObject(CustomerEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CUSTOMERS, doc.id) { customerRepository.insertCustomer(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling customers: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullUsers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_USERS).get().await().documents) { doc.toObject(UserEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_USERS, doc.id) { userRepository.insertUser(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling users: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_USERS).get().await().documents) { doc.toObject(UserEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_USERS, doc.id) { userRepository.insertUser(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling users: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullCategories(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_CATEGORIES).get().await().documents) { doc.toObject(CategoryEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CATEGORIES, doc.id) { categoryRepository.insertCategory(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling categories: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_CATEGORIES).get().await().documents) { doc.toObject(CategoryEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CATEGORIES, doc.id) { categoryRepository.insertCategory(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling categories: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullSuppliers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SUPPLIERS).get().await().documents) { doc.toObject(SupplierEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SUPPLIERS, doc.id) { supplierRepository.insertSupplier(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling suppliers: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SUPPLIERS).get().await().documents) { doc.toObject(SupplierEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SUPPLIERS, doc.id) { supplierRepository.insertSupplier(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling suppliers: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullPurchases(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PURCHASES).get().await().documents) { doc.toObject(PurchaseEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASES, doc.id) { purchaseRepository.insertPurchase(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchases: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_PURCHASES).get().await().documents) { doc.toObject(PurchaseEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASES, doc.id) { purchaseRepository.insertPurchase(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchases: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullPurchaseItems(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PURCHASE_ITEMS).get().await().documents) { doc.toObject(PurchaseItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASE_ITEMS, doc.id) { purchaseRepository.insertPurchaseItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchase items: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_PURCHASE_ITEMS).get().await().documents) { doc.toObject(PurchaseItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASE_ITEMS, doc.id) { purchaseRepository.insertPurchaseItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchase items: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun pullSettings(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SETTINGS).get().await().documents) { doc.toObject(SettingEntity::class.java)?.let { settingRepository.insertSetting(it.copy(firebaseId = doc.id, isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling settings: ${e.localizedMessage}") }
+        try { for (doc in firestore.collection(COLLECTION_SETTINGS).get().await().documents) { doc.toObject(SettingEntity::class.java)?.let { settingRepository.insertSetting(it.copy(firebaseId = doc.id, isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling settings: ${e.localizedMessage}"); throw e }
     }
 
     private suspend fun insertPulledIfNotPending(

@@ -119,16 +119,25 @@ class NewSaleViewModel @Inject constructor(
      * @param quantity The quantity to add.
      */
     fun addToCart(product: ProductEntity, quantity: Double) {
-        if (quantity <= 0) return
+        if (!quantity.isFinite() || quantity <= 0) {
+            _errorMessage.value = "Enter a valid quantity greater than zero"
+            return
+        }
 
         val currentList = _cartItems.value.toMutableList()
         val existingIndex = currentList.indexOfFirst { it.product.id == product.id }
+        val requestedQuantity = if (existingIndex >= 0) {
+            currentList[existingIndex].quantity + quantity
+        } else {
+            quantity
+        }
+
+        if (!isQuantityAvailable(product, requestedQuantity)) return
 
         if (existingIndex >= 0) {
             // Update existing cart item quantity by adding requested amount
             val existingItem = currentList[existingIndex]
-            val updatedQuantity = existingItem.quantity + quantity
-            currentList[existingIndex] = existingItem.copy(quantity = updatedQuantity)
+            currentList[existingIndex] = existingItem.copy(quantity = requestedQuantity)
         } else {
             // Add new cart item entry
             currentList.add(CartItem(product = product, quantity = quantity))
@@ -154,10 +163,17 @@ class NewSaleViewModel @Inject constructor(
      * @param quantity New quantity value.
      */
     fun updateQuantity(product: ProductEntity, quantity: Double) {
+        if (!quantity.isFinite()) {
+            _errorMessage.value = "Enter a valid quantity"
+            return
+        }
+
         if (quantity <= 0) {
             removeFromCart(product)
             return
         }
+
+        if (!isQuantityAvailable(product, quantity)) return
 
         _cartItems.value = _cartItems.value.map { item ->
             if (item.product.id == product.id) {
@@ -166,6 +182,19 @@ class NewSaleViewModel @Inject constructor(
                 item
             }
         }
+    }
+
+    private fun isQuantityAvailable(product: ProductEntity, requestedQuantity: Double): Boolean {
+        val availableQuantity = product.stockQuantity
+        if (!availableQuantity.isFinite() || availableQuantity < 0) {
+            _errorMessage.value = "Invalid stock quantity for ${product.name}"
+            return false
+        }
+        if (!requestedQuantity.isFinite() || requestedQuantity > availableQuantity) {
+            _errorMessage.value = "Only $availableQuantity ${product.unit} of ${product.name} is available"
+            return false
+        }
+        return true
     }
 
     /**
@@ -223,10 +252,10 @@ class NewSaleViewModel @Inject constructor(
             _errorMessage.value = "Cart is empty. Please add items to checkout."
             return
         }
+        if (!_isProcessing.compareAndSet(expect = false, update = true)) return
 
         viewModelScope.launch {
             try {
-                _isProcessing.value = true
                 val currentTime = System.currentTimeMillis()
                 val grandTotal = currentCart.sumOf { it.subtotal }
 

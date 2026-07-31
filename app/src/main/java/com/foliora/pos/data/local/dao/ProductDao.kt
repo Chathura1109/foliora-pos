@@ -74,8 +74,8 @@ interface ProductDao {
     /**
      * Directly updates the stock quantity of a specified product.
      */
-    @Query("UPDATE products SET stockQuantity = :newQuantity WHERE id = :productId")
-    suspend fun updateStockQuantity(productId: Int, newQuantity: Double): Int
+    @Query("UPDATE products SET stockQuantity = :newQuantity, isSynced = 0, updatedAt = :updatedAt WHERE id = :productId")
+    suspend fun updateStockQuantity(productId: Int, newQuantity: Double, updatedAt: Long): Int
 
     /**
      * Retrieves all product records that have pending offline changes requiring sync.
