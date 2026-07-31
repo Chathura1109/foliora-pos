@@ -35,7 +35,7 @@ import com.foliora.pos.data.local.entity.*
         SettingEntity::class,
         PendingDeletionEntity::class
     ],
-    version = 2,
+    version = 4,
     exportSchema = false // Set to true in production for migration tracking
 )
 abstract class FolioraDatabase : RoomDatabase() {

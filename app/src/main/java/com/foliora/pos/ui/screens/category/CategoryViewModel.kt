@@ -5,8 +5,10 @@ import androidx.lifecycle.viewModelScope
 import com.foliora.pos.data.local.entity.CategoryEntity
 import com.foliora.pos.data.repository.CategoryRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -19,6 +21,9 @@ import javax.inject.Inject
 class CategoryViewModel @Inject constructor(
     private val repository: CategoryRepository
 ) : ViewModel() {
+
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
     /**
      * Exposes the full list of categories ordered alphabetically as a StateFlow.
@@ -65,7 +70,15 @@ class CategoryViewModel @Inject constructor(
      */
     fun deleteCategory(category: CategoryEntity) {
         viewModelScope.launch {
-            repository.deleteCategory(category)
+            try {
+                repository.deleteCategory(category)
+            } catch (e: Exception) {
+                _errorMessage.value = e.localizedMessage ?: "Unable to delete category"
+            }
         }
+    }
+
+    fun clearErrorMessage() {
+        _errorMessage.value = null
     }
 }

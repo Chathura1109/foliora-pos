@@ -33,6 +33,10 @@ class SupplierRepository @Inject constructor(
      * Deletes a supplier entity from the database.
      */
     suspend fun deleteSupplier(supplier: SupplierEntity) {
+        val purchaseCount = supplierDao.getPurchaseCount(supplier.id)
+        require(purchaseCount == 0) {
+            "${supplier.name} cannot be deleted because it has $purchaseCount purchase record(s)"
+        }
         supplierDao.deleteSupplier(supplier)
     }
 

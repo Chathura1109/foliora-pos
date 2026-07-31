@@ -32,6 +32,9 @@ class ProductViewModel @Inject constructor(
     private val userRepository: UserRepository
 ) : ViewModel() {
 
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
     private val _currentUserRole = MutableStateFlow<String>("CASHIER") // Default to Cashier for safety
     val currentUserRole: StateFlow<String> = _currentUserRole.asStateFlow()
 
@@ -155,7 +158,15 @@ class ProductViewModel @Inject constructor(
      */
     fun deleteProduct(product: ProductEntity) {
         viewModelScope.launch {
-            productRepository.deleteProduct(product)
+            try {
+                productRepository.deleteProduct(product)
+            } catch (e: Exception) {
+                _errorMessage.value = e.localizedMessage ?: "Unable to delete product"
+            }
         }
+    }
+
+    fun clearErrorMessage() {
+        _errorMessage.value = null
     }
 }

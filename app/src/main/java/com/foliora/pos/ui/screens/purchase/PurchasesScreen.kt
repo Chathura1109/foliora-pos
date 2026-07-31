@@ -47,9 +47,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.PurchaseEntity
+import com.foliora.pos.data.local.entity.PurchaseItemEntity
 import com.foliora.pos.data.local.entity.SupplierEntity
 import com.foliora.pos.ui.components.FolioraTopAppBar
+import kotlinx.coroutines.flow.Flow
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -71,13 +74,16 @@ fun PurchasesScreen(
 ) {
     val purchases by viewModel.purchases.collectAsStateWithLifecycle()
     val suppliers by viewModel.suppliers.collectAsStateWithLifecycle()
+    val products by viewModel.products.collectAsStateWithLifecycle()
 
     PurchasesScreenContent(
         purchases = purchases,
         suppliers = suppliers,
+        products = products,
         onBackClick = onBackClick,
         onNewPurchaseClick = onNavigateToNewPurchase,
-        onDeletePurchase = { purchase -> viewModel.deletePurchase(purchase) }
+        onDeletePurchase = { purchase -> viewModel.deletePurchase(purchase) },
+        onGetPurchaseItems = viewModel::getPurchaseItems
     )
 }
 
@@ -91,13 +97,16 @@ fun PurchasesScreen(
 fun PurchasesScreenContent(
     purchases: List<PurchaseEntity>,
     suppliers: List<SupplierEntity>,
+    products: List<ProductEntity>,
     onBackClick: (() -> Unit)?,
     onNewPurchaseClick: () -> Unit,
     onDeletePurchase: (PurchaseEntity) -> Unit,
+    onGetPurchaseItems: (Int) -> Flow<List<PurchaseItemEntity>>,
     modifier: Modifier = Modifier
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var purchaseToDelete by remember { mutableStateOf<PurchaseEntity?>(null) }
+    var purchaseDetailsToShow by remember { mutableStateOf<PurchaseEntity?>(null) }
 
     // Map supplier ID to supplier entity for fast lookup
     val supplierMap = remember(suppliers) {
@@ -224,6 +233,7 @@ fun PurchasesScreenContent(
                         PurchaseItemCard(
                             purchase = purchase,
                             supplierName = supplierName,
+                            onClick = { purchaseDetailsToShow = purchase },
                             onDeleteClick = { purchaseToDelete = purchase }
                         )
                     }
@@ -246,6 +256,15 @@ fun PurchasesScreenContent(
             }
         )
     }
+
+    if (purchaseDetailsToShow != null) {
+        PurchaseDetailsDialog(
+            purchase = purchaseDetailsToShow!!,
+            products = products,
+            onGetPurchaseItems = onGetPurchaseItems,
+            onDismiss = { purchaseDetailsToShow = null }
+        )
+    }
 }
 
 /**
@@ -256,6 +275,7 @@ fun PurchasesScreenContent(
 fun PurchaseItemCard(
     purchase: PurchaseEntity,
     supplierName: String?,
+    onClick: () -> Unit,
     onDeleteClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -272,6 +292,7 @@ fun PurchaseItemCard(
 
     Card(
         modifier = modifier.fillMaxWidth(),
+        onClick = onClick,
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
@@ -435,6 +456,88 @@ fun PurchaseDeleteConfirmationDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text(text = "Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun PurchaseDetailsDialog(
+    purchase: PurchaseEntity,
+    products: List<ProductEntity>,
+    onGetPurchaseItems: (Int) -> Flow<List<PurchaseItemEntity>>,
+    onDismiss: () -> Unit
+) {
+    val itemsFlow = remember(purchase.id) { onGetPurchaseItems(purchase.id) }
+    val purchaseItems by itemsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val productMap = remember(products) { products.associateBy { it.id } }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(text = "Purchase #${purchase.id} Details", fontWeight = FontWeight.Bold)
+        },
+        text = {
+            if (purchaseItems.isEmpty()) {
+                Text(text = "Loading items...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(purchaseItems) { item ->
+                        val productName = productMap[item.productId]?.name ?: "Unknown Product"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = productName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "${item.quantity} x Rs. ${String.format(Locale.US, "%.2f", item.buyingPrice)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                text = "Rs. ${String.format(Locale.US, "%.2f", item.subtotal)}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    item {
+                        androidx.compose.material3.HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Total",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "Rs. ${String.format(Locale.US, "%.2f", purchase.totalCost)}",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "Close")
             }
         }
     )

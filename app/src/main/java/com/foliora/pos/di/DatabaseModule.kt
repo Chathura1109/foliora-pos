@@ -86,9 +86,96 @@ object DatabaseModule {
         }
     }
 
+    private val migration3To4 = object : Migration(3, 4) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE `purchases_backup` AS
+                SELECT `id`, `supplierId`, `date`, `totalCost`, `status`, `createdBy`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `purchases`
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE `purchase_items_backup` AS
+                SELECT `id`, `purchaseId`, `productId`, `quantity`, `buyingPrice`, `subtotal`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `purchase_items`
+                """.trimIndent()
+            )
+            database.execSQL("DROP TABLE `purchase_items`")
+            database.execSQL("DROP TABLE `purchases`")
+            database.execSQL(
+                """
+                CREATE TABLE `purchases` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `supplierId` INTEGER NOT NULL,
+                    `date` INTEGER NOT NULL,
+                    `totalCost` REAL NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `createdBy` INTEGER NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`supplierId`) REFERENCES `suppliers`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT,
+                    FOREIGN KEY(`createdBy`) REFERENCES `users`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                INSERT INTO `purchases`
+                SELECT `id`, `supplierId`, `date`, `totalCost`, `status`, `createdBy`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `purchases_backup`
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE `purchase_items` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `purchaseId` INTEGER NOT NULL,
+                    `productId` INTEGER NOT NULL,
+                    `quantity` REAL NOT NULL,
+                    `buyingPrice` REAL NOT NULL,
+                    `subtotal` REAL NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`purchaseId`) REFERENCES `purchases`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                    FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                INSERT INTO `purchase_items`
+                SELECT `id`, `purchaseId`, `productId`, `quantity`, `buyingPrice`, `subtotal`,
+                       `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                FROM `purchase_items_backup`
+                """.trimIndent()
+            )
+            database.execSQL("DROP TABLE `purchase_items_backup`")
+            database.execSQL("DROP TABLE `purchases_backup`")
+            database.execSQL("CREATE INDEX `index_purchases_supplierId` ON `purchases` (`supplierId`)")
+            database.execSQL("CREATE INDEX `index_purchases_createdBy` ON `purchases` (`createdBy`)")
+            database.execSQL("CREATE INDEX `index_purchase_items_purchaseId` ON `purchase_items` (`purchaseId`)")
+            database.execSQL("CREATE INDEX `index_purchase_items_productId` ON `purchase_items` (`productId`)")
+            createDeletionTriggers(database)
+        }
+    }
+
     private val databaseCallback = object : RoomDatabase.Callback() {
         override fun onCreate(database: SupportSQLiteDatabase) {
             super.onCreate(database)
+            createDeletionTriggers(database)
+        }
+
+        override fun onOpen(database: SupportSQLiteDatabase) {
+            super.onOpen(database)
             createDeletionTriggers(database)
         }
     }
@@ -107,7 +194,7 @@ object DatabaseModule {
             FolioraDatabase::class.java,
             "foliora_database"
         )
-            .addMigrations(migration1To2)
+            .addMigrations(migration1To2, migration3To4)
             .addCallback(databaseCallback)
             // fallbackToDestructiveMigration() means: if the schema changes and there's
             // no migration defined, wipe the database and start fresh. Fine for development,

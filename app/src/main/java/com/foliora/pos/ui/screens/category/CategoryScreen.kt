@@ -28,9 +28,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,9 +60,12 @@ fun CategoryScreen(
     viewModel: CategoryViewModel = hiltViewModel()
 ) {
     val categories by viewModel.categories.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
 
     CategoryScreenContent(
         categories = categories,
+        errorMessage = errorMessage,
+        onErrorShown = viewModel::clearErrorMessage,
         onBackClick = onBackClick,
         onAddCategory = { name, desc -> viewModel.addCategory(name, desc) },
         onUpdateCategory = { category -> viewModel.updateCategory(category) },
@@ -75,6 +81,8 @@ fun CategoryScreen(
 @Composable
 fun CategoryScreenContent(
     categories: List<CategoryEntity>,
+    errorMessage: String?,
+    onErrorShown: () -> Unit,
     onBackClick: (() -> Unit)?,
     onAddCategory: (String, String?) -> Unit,
     onUpdateCategory: (CategoryEntity) -> Unit,
@@ -85,9 +93,18 @@ fun CategoryScreenContent(
     var isAddEditDialogVisible by remember { mutableStateOf(false) }
     var categoryToEdit by remember { mutableStateOf<CategoryEntity?>(null) }
     var categoryToDelete by remember { mutableStateOf<CategoryEntity?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(errorMessage) {
+        errorMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            onErrorShown()
+        }
+    }
 
     Scaffold(
         modifier = modifier,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             FolioraTopAppBar(
                 title = "Categories",
