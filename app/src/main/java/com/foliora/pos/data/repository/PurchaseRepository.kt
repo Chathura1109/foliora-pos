@@ -2,11 +2,14 @@ package com.foliora.pos.data.repository
 
 import androidx.room.withTransaction
 import com.foliora.pos.data.local.FolioraDatabase
+import com.foliora.pos.data.local.dao.InventoryBatchDao
 import com.foliora.pos.data.local.dao.ProductDao
 import com.foliora.pos.data.local.dao.PurchaseDao
 import com.foliora.pos.data.local.dao.PurchaseItemDao
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.PurchaseEntity
 import com.foliora.pos.data.local.entity.PurchaseItemEntity
+import com.foliora.pos.data.local.entity.priceToCents
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 
@@ -24,7 +27,8 @@ class PurchaseRepository @Inject constructor(
     private val database: FolioraDatabase,
     private val purchaseDao: PurchaseDao,
     private val purchaseItemDao: PurchaseItemDao,
-    private val productDao: ProductDao
+    private val productDao: ProductDao,
+    private val inventoryBatchDao: InventoryBatchDao
 ) {
 
     // --- PurchaseDao Wrapped Methods ---
@@ -158,6 +162,19 @@ class PurchaseRepository @Inject constructor(
     ): Long = database.withTransaction {
         val now = System.currentTimeMillis()
 
+        require(items.isNotEmpty()) { "A purchase must contain at least one item" }
+        items.forEach { item ->
+            require(item.quantity.isFinite() && item.quantity > 0) {
+                "Purchase quantity must be a valid number greater than zero"
+            }
+            require(item.buyingPrice.isFinite() && item.buyingPrice >= 0) {
+                "Purchase cost must be a valid non-negative number"
+            }
+            require(item.sellingPrice.isFinite() && item.sellingPrice >= 0) {
+                "Batch selling price must be a valid non-negative number"
+            }
+        }
+
         // Step a: Insert initial purchase header into database to get generated ID
         val initialPurchase = purchase.copy(
             updatedAt = now
@@ -165,10 +182,63 @@ class PurchaseRepository @Inject constructor(
         val purchaseIdLong = purchaseDao.insertPurchase(initialPurchase)
         val generatedPurchaseId = purchaseIdLong.toInt()
 
-        // Step b: Associate each line item with the generated purchase ID
+        val receivedAt = purchase.date.takeIf { it > 0 } ?: now
+
+        // Step b: Reuse the selected/equally-priced batch, or create a new price batch.
         val itemsWithPurchaseId = items.map { item ->
+            val product = requireNotNull(productDao.getProductById(item.productId)) {
+                "Product ${item.productId} no longer exists"
+            }
+            val unitCostCents = priceToCents(item.buyingPrice)
+            val sellingPriceCents = priceToCents(item.sellingPrice)
+            val selectedBatch = item.batchId
+                ?.let { inventoryBatchDao.getBatchById(it) }
+                ?.takeIf { batch ->
+                    batch.productId == item.productId &&
+                        batch.unitCostCents == unitCostCents &&
+                        batch.sellingPriceCents == sellingPriceCents
+                }
+            val matchingBatch = selectedBatch ?: inventoryBatchDao.findBatchByPrice(
+                productId = item.productId,
+                unitCostCents = unitCostCents,
+                sellingPriceCents = sellingPriceCents
+            )
+
+            val confirmedBatchId = if (matchingBatch != null) {
+                inventoryBatchDao.updateBatch(
+                    matchingBatch.copy(
+                        originalQuantity = matchingBatch.originalQuantity + item.quantity,
+                        remainingQuantity = matchingBatch.remainingQuantity + item.quantity,
+                        receivedAt = receivedAt,
+                        isSynced = false,
+                        updatedAt = now
+                    )
+                )
+                matchingBatch.id
+            } else {
+                inventoryBatchDao.insertBatch(
+                    InventoryBatchEntity(
+                        productId = item.productId,
+                        originalQuantity = item.quantity,
+                        remainingQuantity = item.quantity,
+                        unitCost = item.buyingPrice,
+                        sellingPrice = item.sellingPrice,
+                        unitCostCents = unitCostCents,
+                        sellingPriceCents = sellingPriceCents,
+                        receivedAt = receivedAt,
+                        isSynced = false,
+                        firebaseId = product.firebaseId?.let { productFirebaseId ->
+                            "price_${productFirebaseId}_${unitCostCents}_${sellingPriceCents}"
+                        },
+                        createdAt = now,
+                        updatedAt = now
+                    )
+                ).toInt()
+            }
+
             item.copy(
                 purchaseId = generatedPurchaseId,
+                batchId = confirmedBatchId,
                 updatedAt = now
             )
         }
@@ -187,7 +257,15 @@ class PurchaseRepository @Inject constructor(
             val product = productDao.getProductById(item.productId)
             if (product != null) {
                 val newStockQuantity = product.stockQuantity + item.quantity
-                productDao.updateStockQuantity(product.id, newStockQuantity, now)
+                productDao.updateProduct(
+                    product.copy(
+                        buyingPrice = item.buyingPrice,
+                        sellingPrice = item.sellingPrice,
+                        stockQuantity = newStockQuantity,
+                        isSynced = false,
+                        updatedAt = now
+                    )
+                )
             }
         }
 

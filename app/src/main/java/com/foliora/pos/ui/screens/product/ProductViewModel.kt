@@ -3,9 +3,12 @@ package com.foliora.pos.ui.screens.product
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.foliora.pos.data.local.entity.CategoryEntity
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.repository.CategoryRepository
+import com.foliora.pos.data.repository.InventoryBatchRepository
 import com.foliora.pos.data.repository.ProductRepository
+import com.foliora.pos.data.repository.StockAdjustmentRepository
 import com.foliora.pos.data.repository.UserRepository
 import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import com.google.firebase.auth.FirebaseAuth
@@ -30,11 +33,16 @@ import javax.inject.Inject
 class ProductViewModel @Inject constructor(
     private val productRepository: ProductRepository,
     private val categoryRepository: CategoryRepository,
+    private val inventoryBatchRepository: InventoryBatchRepository,
+    private val stockAdjustmentRepository: StockAdjustmentRepository,
     private val userRepository: UserRepository
 ) : ViewModel() {
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    private val _isAdjustingStock = MutableStateFlow(false)
+    val isAdjustingStock: StateFlow<Boolean> = _isAdjustingStock.asStateFlow()
 
     private val _currentUserRole = MutableStateFlow<String>("CASHIER") // Default to Cashier for safety
     val currentUserRole: StateFlow<String> = _currentUserRole.asStateFlow()
@@ -74,6 +82,15 @@ class ProductViewModel @Inject constructor(
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
         )
+
+    /** All price batches used to show per-product stock details. */
+    val inventoryBatches: StateFlow<List<InventoryBatchEntity>> =
+        inventoryBatchRepository.getAllBatches()
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
 
     /**
      * Adds a new product entity to the database with individual parameter fields.
@@ -117,7 +134,7 @@ class ProductViewModel @Inject constructor(
                 createdAt = currentTime,
                 updatedAt = currentTime
             )
-            productRepository.insertProduct(newProduct)
+            productRepository.createProductWithOpeningBatch(newProduct)
         }
     }
 
@@ -143,7 +160,7 @@ class ProductViewModel @Inject constructor(
      */
     fun updateProduct(product: ProductEntity) {
         launchCrudCatching("Unable to update product", onError = { _errorMessage.value = it }) {
-            productRepository.updateProduct(
+            productRepository.updateProductDetails(
                 product.copy(
                     isSynced = false,
                     updatedAt = System.currentTimeMillis()
@@ -160,6 +177,39 @@ class ProductViewModel @Inject constructor(
     fun deleteProduct(product: ProductEntity) {
         launchCrudCatching("Unable to delete product", onError = { _errorMessage.value = it }) {
             productRepository.deleteProduct(product)
+        }
+    }
+
+    fun adjustStock(
+        productId: Int,
+        batchId: Int,
+        adjustmentType: String,
+        quantity: Double,
+        reason: String,
+        notes: String?
+    ) {
+        if (_isAdjustingStock.value) return
+        _isAdjustingStock.value = true
+        launchCrudCatching("Unable to adjust stock", onError = { _errorMessage.value = it }) {
+            try {
+                val firebaseUid = FirebaseAuth.getInstance().currentUser?.uid
+                    ?: error("Please log in again before adjusting stock")
+                val currentUser = userRepository.getUserByFirebaseUid(firebaseUid)
+                    ?: error("Current user profile does not exist locally. Sync users and try again")
+                require(currentUser.role == "OWNER") { "Only the owner can adjust stock" }
+
+                stockAdjustmentRepository.adjustBatchStock(
+                    productId = productId,
+                    batchId = batchId,
+                    adjustedBy = currentUser.id,
+                    adjustmentType = adjustmentType,
+                    quantity = quantity,
+                    reason = reason,
+                    notes = notes
+                )
+            } finally {
+                _isAdjustingStock.value = false
+            }
         }
     }
 

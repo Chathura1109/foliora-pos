@@ -44,12 +44,20 @@ object DatabaseModule {
         "suppliers" to "suppliers",
         "purchases" to "purchases",
         "purchase_items" to "purchase_items",
+        "inventory_batches" to "inventory_batches",
+        "stock_adjustments" to "stock_adjustments",
         "sales" to "sales",
         "sale_items" to "sale_items"
     )
 
     private fun createDeletionTriggers(database: SupportSQLiteDatabase) {
         deletionSources.forEach { (table, collection) ->
+            val tableExists = database.query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+                arrayOf(table)
+            ).use { cursor -> cursor.moveToFirst() }
+            if (!tableExists) return@forEach
+
             database.execSQL(
                 """
                 CREATE TRIGGER IF NOT EXISTS `queue_${table}_deletion`
@@ -293,6 +301,234 @@ object DatabaseModule {
         }
     }
 
+    private val migration4To5 = object : Migration(4, 5) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `inventory_batches` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `productId` INTEGER NOT NULL,
+                    `purchaseItemId` INTEGER,
+                    `originalQuantity` REAL NOT NULL,
+                    `remainingQuantity` REAL NOT NULL,
+                    `unitCost` REAL NOT NULL,
+                    `receivedAt` INTEGER NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT,
+                    FOREIGN KEY(`purchaseItemId`) REFERENCES `purchase_items`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_inventory_batches_productId` " +
+                    "ON `inventory_batches` (`productId`)"
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_inventory_batches_purchaseItemId` " +
+                    "ON `inventory_batches` (`purchaseItemId`)"
+            )
+            database.execSQL(
+                """
+                INSERT INTO `inventory_batches` (
+                    `productId`, `purchaseItemId`, `originalQuantity`, `remainingQuantity`,
+                    `unitCost`, `receivedAt`, `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                )
+                SELECT
+                    `id`, NULL, `stockQuantity`, `stockQuantity`, `buyingPrice`, `createdAt`, 0,
+                    CASE
+                        WHEN `firebaseId` IS NOT NULL AND TRIM(`firebaseId`) != ''
+                        THEN 'opening_' || `firebaseId`
+                        ELSE NULL
+                    END,
+                    `createdAt`, `updatedAt`
+                FROM `products`
+                WHERE `stockQuantity` > 0
+                """.trimIndent()
+            )
+
+            database.execSQL(
+                """
+                CREATE TABLE `sale_items_new` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `saleId` INTEGER NOT NULL,
+                    `productId` INTEGER NOT NULL,
+                    `batchId` INTEGER,
+                    `quantity` REAL NOT NULL,
+                    `sellingPrice` REAL NOT NULL,
+                    `unitCost` REAL NOT NULL,
+                    `subtotal` REAL NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`saleId`) REFERENCES `sales`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                    FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT,
+                    FOREIGN KEY(`batchId`) REFERENCES `inventory_batches`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                INSERT INTO `sale_items_new` (
+                    `id`, `saleId`, `productId`, `batchId`, `quantity`, `sellingPrice`,
+                    `unitCost`, `subtotal`, `isSynced`, `firebaseId`, `createdAt`, `updatedAt`
+                )
+                SELECT
+                    si.`id`, si.`saleId`, si.`productId`, NULL, si.`quantity`, si.`sellingPrice`,
+                    p.`buyingPrice`, si.`subtotal`, si.`isSynced`, si.`firebaseId`,
+                    si.`createdAt`, si.`updatedAt`
+                FROM `sale_items` si
+                INNER JOIN `products` p ON p.`id` = si.`productId`
+                """.trimIndent()
+            )
+            database.execSQL("DROP TABLE `sale_items`")
+            database.execSQL("ALTER TABLE `sale_items_new` RENAME TO `sale_items`")
+            database.execSQL("CREATE INDEX `index_sale_items_saleId` ON `sale_items` (`saleId`)")
+            database.execSQL("CREATE INDEX `index_sale_items_productId` ON `sale_items` (`productId`)")
+            database.execSQL("CREATE INDEX `index_sale_items_batchId` ON `sale_items` (`batchId`)")
+            createDeletionTriggers(database)
+        }
+    }
+
+    private val migration5To6 = object : Migration(5, 6) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                "ALTER TABLE `purchase_items` " +
+                    "ADD COLUMN `sellingPrice` REAL NOT NULL DEFAULT 0"
+            )
+            database.execSQL(
+                """
+                UPDATE `purchase_items`
+                SET `sellingPrice` = COALESCE(
+                    (SELECT p.`sellingPrice` FROM `products` p
+                     WHERE p.`id` = `purchase_items`.`productId`),
+                    0
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                "ALTER TABLE `inventory_batches` " +
+                    "ADD COLUMN `sellingPrice` REAL NOT NULL DEFAULT 0"
+            )
+            database.execSQL(
+                """
+                UPDATE `inventory_batches`
+                SET `sellingPrice` = COALESCE(
+                    (SELECT p.`sellingPrice` FROM `products` p
+                     WHERE p.`id` = `inventory_batches`.`productId`),
+                    0
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                UPDATE `products`
+                SET `buyingPrice` = COALESCE(
+                    (SELECT b.`unitCost` FROM `inventory_batches` b
+                     WHERE b.`productId` = `products`.`id`
+                     ORDER BY b.`receivedAt` DESC, b.`id` DESC
+                     LIMIT 1),
+                    `buyingPrice`
+                )
+                WHERE EXISTS (
+                    SELECT 1 FROM `inventory_batches` b
+                    WHERE b.`productId` = `products`.`id`
+                )
+                """.trimIndent()
+            )
+        }
+    }
+
+    private val migration6To7 = object : Migration(6, 7) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                "ALTER TABLE `purchase_items` ADD COLUMN `batchId` INTEGER"
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_purchase_items_batchId` " +
+                    "ON `purchase_items` (`batchId`)"
+            )
+            database.execSQL(
+                """
+                UPDATE `purchase_items`
+                SET `batchId` = (
+                    SELECT b.`id` FROM `inventory_batches` b
+                    WHERE b.`purchaseItemId` = `purchase_items`.`id`
+                    ORDER BY b.`id` DESC
+                    LIMIT 1
+                )
+                WHERE EXISTS (
+                    SELECT 1 FROM `inventory_batches` b
+                    WHERE b.`purchaseItemId` = `purchase_items`.`id`
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                "ALTER TABLE `inventory_batches` " +
+                    "ADD COLUMN `unitCostCents` INTEGER NOT NULL DEFAULT 0"
+            )
+            database.execSQL(
+                "ALTER TABLE `inventory_batches` " +
+                    "ADD COLUMN `sellingPriceCents` INTEGER NOT NULL DEFAULT 0"
+            )
+            database.execSQL(
+                """
+                UPDATE `inventory_batches`
+                SET `unitCostCents` = CAST(ROUND(`unitCost` * 100.0) AS INTEGER),
+                    `sellingPriceCents` = CAST(ROUND(`sellingPrice` * 100.0) AS INTEGER)
+                """.trimIndent()
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_inventory_batches_productId_unitCostCents_sellingPriceCents` " +
+                    "ON `inventory_batches` (`productId`, `unitCostCents`, `sellingPriceCents`)"
+            )
+        }
+    }
+
+    private val migration7To8 = object : Migration(7, 8) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `stock_adjustments` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `productId` INTEGER NOT NULL,
+                    `batchId` INTEGER NOT NULL,
+                    `adjustedBy` INTEGER NOT NULL,
+                    `adjustmentType` TEXT NOT NULL,
+                    `quantity` REAL NOT NULL,
+                    `reason` TEXT NOT NULL,
+                    `notes` TEXT,
+                    `resultingBatchQuantity` REAL NOT NULL,
+                    `resultingProductQuantity` REAL NOT NULL,
+                    `isSynced` INTEGER NOT NULL,
+                    `firebaseId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT,
+                    FOREIGN KEY(`batchId`) REFERENCES `inventory_batches`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT,
+                    FOREIGN KEY(`adjustedBy`) REFERENCES `users`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_stock_adjustments_productId` " +
+                    "ON `stock_adjustments` (`productId`)"
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_stock_adjustments_batchId` " +
+                    "ON `stock_adjustments` (`batchId`)"
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_stock_adjustments_adjustedBy` " +
+                    "ON `stock_adjustments` (`adjustedBy`)"
+            )
+            createDeletionTriggers(database)
+        }
+    }
+
     private val databaseCallback = object : RoomDatabase.Callback() {
         override fun onCreate(database: SupportSQLiteDatabase) {
             super.onCreate(database)
@@ -319,7 +555,15 @@ object DatabaseModule {
             FolioraDatabase::class.java,
             "foliora_database"
         )
-            .addMigrations(migration1To2, migration2To3, migration3To4)
+            .addMigrations(
+                migration1To2,
+                migration2To3,
+                migration3To4,
+                migration4To5,
+                migration5To6,
+                migration6To7,
+                migration7To8
+            )
             .addCallback(databaseCallback)
             .build()
     }
@@ -348,6 +592,14 @@ object DatabaseModule {
 
     @Provides
     fun providePurchaseItemDao(database: FolioraDatabase): PurchaseItemDao = database.purchaseItemDao()
+
+    @Provides
+    fun provideInventoryBatchDao(database: FolioraDatabase): InventoryBatchDao =
+        database.inventoryBatchDao()
+
+    @Provides
+    fun provideStockAdjustmentDao(database: FolioraDatabase): StockAdjustmentDao =
+        database.stockAdjustmentDao()
 
     @Provides
     fun provideSaleDao(database: FolioraDatabase): SaleDao = database.saleDao()

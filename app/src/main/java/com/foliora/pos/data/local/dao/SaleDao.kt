@@ -76,7 +76,7 @@ interface SaleDao {
     /**
      * Calculates and observes total profit for sales recorded between startOfDay and endOfDay.
      */
-    @Query("SELECT SUM((si.sellingPrice - p.buyingPrice) * si.quantity) FROM sales s INNER JOIN sale_items si ON s.id = si.saleId INNER JOIN products p ON si.productId = p.id WHERE s.createdAt BETWEEN :startOfDay AND :endOfDay")
+    @Query("SELECT SUM((si.sellingPrice - si.unitCost) * si.quantity) FROM sales s INNER JOIN sale_items si ON s.id = si.saleId WHERE s.createdAt BETWEEN :startOfDay AND :endOfDay")
     fun getTodaysProfit(startOfDay: Long, endOfDay: Long): Flow<Double?>
 
     /**

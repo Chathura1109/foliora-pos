@@ -2,10 +2,13 @@ package com.foliora.pos.ui.screens.purchase
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.PurchaseEntity
 import com.foliora.pos.data.local.entity.PurchaseItemEntity
 import com.foliora.pos.data.local.entity.SupplierEntity
+import com.foliora.pos.data.local.entity.priceToCents
+import com.foliora.pos.data.repository.InventoryBatchRepository
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.PurchaseRepository
 import com.foliora.pos.data.repository.SupplierRepository
@@ -26,12 +29,19 @@ import javax.inject.Inject
  * @property product The [ProductEntity] selected for restock purchase.
  * @property quantity The quantity unit amount being purchased.
  * @property buyingPrice The custom unit buying price for this specific restock batch.
+ * @property sellingPrice The unit selling price for this specific restock batch.
  */
 data class PurchaseCartItem(
     val product: ProductEntity,
+    val batchId: Int?,
     val quantity: Double,
-    val buyingPrice: Double
+    val buyingPrice: Double,
+    val sellingPrice: Double
 ) {
+    val lineKey: String
+        get() = batchId?.let { "batch:$it" }
+            ?: "price:${product.id}:${priceToCents(buyingPrice)}:${priceToCents(sellingPrice)}"
+
     /**
      * Line item subtotal calculated as quantity multiplied by the custom buying price.
      */
@@ -55,6 +65,7 @@ class NewPurchaseViewModel @Inject constructor(
     private val productRepository: ProductRepository,
     private val supplierRepository: SupplierRepository,
     private val purchaseRepository: PurchaseRepository,
+    private val inventoryBatchRepository: InventoryBatchRepository,
     private val userRepository: UserRepository
 ) : ViewModel() {
 
@@ -79,6 +90,15 @@ class NewPurchaseViewModel @Inject constructor(
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
         )
+
+    /** All current and exhausted price batches available for restock selection. */
+    val inventoryBatches: StateFlow<List<InventoryBatchEntity>> =
+        inventoryBatchRepository.getAllBatches()
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
 
     private val _cartItems = MutableStateFlow<List<PurchaseCartItem>>(emptyList())
     /**
@@ -122,27 +142,44 @@ class NewPurchaseViewModel @Inject constructor(
      * @param quantity Quantity amount to add.
      * @param customBuyingPrice Custom unit buying price for this purchase.
      */
-    fun addToCart(product: ProductEntity, quantity: Double, customBuyingPrice: Double) {
-        if (quantity <= 0) return
+    fun addToCart(
+        product: ProductEntity,
+        selectedBatch: InventoryBatchEntity?,
+        quantity: Double,
+        customBuyingPrice: Double,
+        customSellingPrice: Double
+    ) {
+        if (!quantity.isFinite() || quantity <= 0) return
+        if (!customBuyingPrice.isFinite() || customBuyingPrice < 0) return
+        if (!customSellingPrice.isFinite() || customSellingPrice < 0) return
 
+        val batchId = selectedBatch
+            ?.takeIf { batch ->
+                batch.productId == product.id &&
+                    batch.unitCostCents == priceToCents(customBuyingPrice) &&
+                    batch.sellingPriceCents == priceToCents(customSellingPrice)
+            }
+            ?.id
+        val newItem = PurchaseCartItem(
+            product = product,
+            batchId = batchId,
+            quantity = quantity,
+            buyingPrice = customBuyingPrice,
+            sellingPrice = customSellingPrice
+        )
         val currentList = _cartItems.value.toMutableList()
-        val existingIndex = currentList.indexOfFirst { it.product.id == product.id }
+        val existingIndex = currentList.indexOfFirst { it.lineKey == newItem.lineKey }
 
         if (existingIndex >= 0) {
             val existingItem = currentList[existingIndex]
             val updatedQuantity = existingItem.quantity + quantity
             currentList[existingIndex] = existingItem.copy(
                 quantity = updatedQuantity,
-                buyingPrice = customBuyingPrice
+                buyingPrice = customBuyingPrice,
+                sellingPrice = customSellingPrice
             )
         } else {
-            currentList.add(
-                PurchaseCartItem(
-                    product = product,
-                    quantity = quantity,
-                    buyingPrice = customBuyingPrice
-                )
-            )
+            currentList.add(newItem)
         }
 
         _cartItems.value = currentList
@@ -153,8 +190,8 @@ class NewPurchaseViewModel @Inject constructor(
      *
      * @param product Product to remove.
      */
-    fun removeFromCart(product: ProductEntity) {
-        _cartItems.value = _cartItems.value.filter { it.product.id != product.id }
+    fun removeFromCart(cartItem: PurchaseCartItem) {
+        _cartItems.value = _cartItems.value.filter { it.lineKey != cartItem.lineKey }
     }
 
     /**
@@ -164,37 +201,15 @@ class NewPurchaseViewModel @Inject constructor(
      * @param product Product to update.
      * @param quantity New quantity value.
      */
-    fun updateQuantity(product: ProductEntity, quantity: Double) {
+    fun updateQuantity(cartItem: PurchaseCartItem, quantity: Double) {
         if (quantity <= 0) {
-            removeFromCart(product)
+            removeFromCart(cartItem)
             return
         }
 
         _cartItems.value = _cartItems.value.map { item ->
-            if (item.product.id == product.id) {
+            if (item.lineKey == cartItem.lineKey) {
                 item.copy(quantity = quantity)
-            } else {
-                item
-            }
-        }
-    }
-
-    /**
-     * Updates both quantity and unit buying price for an item already in the cart.
-     *
-     * @param product Product to update.
-     * @param quantity New quantity value.
-     * @param customBuyingPrice New custom unit buying price.
-     */
-    fun updateCartItem(product: ProductEntity, quantity: Double, customBuyingPrice: Double) {
-        if (quantity <= 0) {
-            removeFromCart(product)
-            return
-        }
-
-        _cartItems.value = _cartItems.value.map { item ->
-            if (item.product.id == product.id) {
-                item.copy(quantity = quantity, buyingPrice = customBuyingPrice)
             } else {
                 item
             }
@@ -275,8 +290,10 @@ class NewPurchaseViewModel @Inject constructor(
                         id = 0,
                         purchaseId = 0, // Auto-assigned during repository completePurchase
                         productId = cartItem.product.id,
+                        batchId = cartItem.batchId,
                         quantity = cartItem.quantity,
                         buyingPrice = cartItem.buyingPrice,
+                        sellingPrice = cartItem.sellingPrice,
                         subtotal = cartItem.subtotal,
                         isSynced = false,
                         firebaseId = null,

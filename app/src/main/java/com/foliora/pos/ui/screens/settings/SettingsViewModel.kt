@@ -39,6 +39,8 @@ class SettingsViewModel @Inject constructor(
     private val categoryRepository: CategoryRepository,
     private val supplierRepository: SupplierRepository,
     private val purchaseRepository: PurchaseRepository,
+    private val inventoryBatchRepository: InventoryBatchRepository,
+    private val stockAdjustmentRepository: StockAdjustmentRepository,
     private val database: FolioraDatabase,
     private val pendingDeletionDao: PendingDeletionDao,
     private val syncCheckpointStore: SyncCheckpointStore,
@@ -179,6 +181,22 @@ class SettingsViewModel @Inject constructor(
                     { purchaseRepository.updatePurchase(it.copy(isSynced = true)) }, errors,
                     prepareForCloud = syncRelationshipMapper::purchaseToCloud)
 
+                _syncStatus.value = "Pushing inventory batches..."
+                pushCollection(firestore, "inventory_batches", inventoryBatchRepository.getUnsyncedBatches(),
+                    { it.id }, { it.firebaseId },
+                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+                    inventoryBatchRepository::updateBatch,
+                    { inventoryBatchRepository.updateBatch(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::inventoryBatchToCloud)
+
+                _syncStatus.value = "Pushing stock adjustments..."
+                pushCollection(firestore, "stock_adjustments", stockAdjustmentRepository.getUnsyncedAdjustments(),
+                    { it.id }, { it.firebaseId },
+                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+                    stockAdjustmentRepository::insertAdjustment,
+                    { stockAdjustmentRepository.insertAdjustment(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::stockAdjustmentToCloud)
+
                 _syncStatus.value = "Pushing purchase items..."
                 pushCollection(firestore, "purchase_items", purchaseRepository.getUnsyncedPurchaseItems(),
                     { it.id }, { it.firebaseId },
@@ -236,6 +254,24 @@ class SettingsViewModel @Inject constructor(
                 _syncStatus.value = "Pulling purchases..."
                 pullCollection(firestore, "purchases", syncRelationshipMapper::purchaseFromCloud,
                     { purchaseRepository.insertPurchase(it) }, errors)
+
+                _syncStatus.value = "Pulling inventory batches..."
+                pullCollection(
+                    firestore,
+                    "inventory_batches",
+                    syncRelationshipMapper::inventoryBatchFromCloud,
+                    { inventoryBatchRepository.insertBatch(it) },
+                    errors
+                )
+
+                _syncStatus.value = "Pulling stock adjustments..."
+                pullCollection(
+                    firestore,
+                    "stock_adjustments",
+                    syncRelationshipMapper::stockAdjustmentFromCloud,
+                    { stockAdjustmentRepository.insertAdjustment(it) },
+                    errors
+                )
 
                 _syncStatus.value = "Pulling purchase items..."
                 pullCollection(

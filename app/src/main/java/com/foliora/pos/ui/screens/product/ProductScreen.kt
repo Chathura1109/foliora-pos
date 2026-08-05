@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -94,6 +95,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.foliora.pos.data.local.entity.CategoryEntity
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.ui.components.CameraPreviewScreen
 import com.foliora.pos.ui.components.FolioraTopAppBar
@@ -104,6 +106,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
@@ -122,8 +126,10 @@ fun ProductScreen(
 ) {
     val products by viewModel.products.collectAsState()
     val categories by viewModel.categories.collectAsState()
+    val inventoryBatches by viewModel.inventoryBatches.collectAsStateWithLifecycle()
     val role by viewModel.currentUserRole.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val isAdjustingStock by viewModel.isAdjustingStock.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(errorMessage) {
@@ -139,6 +145,8 @@ fun ProductScreen(
     var showAddEditDialog by remember { mutableStateOf(false) }
     var productToEdit by remember { mutableStateOf<ProductEntity?>(null) }
     var productToDelete by remember { mutableStateOf<ProductEntity?>(null) }
+    var productForBatchDetails by remember { mutableStateOf<ProductEntity?>(null) }
+    var productForStockAdjustment by remember { mutableStateOf<ProductEntity?>(null) }
 
     // Filter products based on search query and optional category selection
     val filteredProducts = remember(products, searchQuery, selectedCategoryId) {
@@ -148,6 +156,9 @@ fun ProductScreen(
             val matchesCategory = selectedCategoryId == null || product.categoryId == selectedCategoryId
             matchesQuery && matchesCategory
         }
+    }
+    val batchesByProduct = remember(inventoryBatches) {
+        inventoryBatches.groupBy { it.productId }
     }
 
     Scaffold(
@@ -278,6 +289,7 @@ fun ProductScreen(
                         val category = categories.find { it.id == product.categoryId }
                         ProductItemCard(
                             product = product,
+                            batches = batchesByProduct[product.id].orEmpty(),
                             categoryName = category?.name ?: "Uncategorized",
                             userRole = role,
                             onEditClick = {
@@ -286,6 +298,12 @@ fun ProductScreen(
                             },
                             onDeleteClick = {
                                 productToDelete = product
+                            },
+                            onViewBatches = {
+                                productForBatchDetails = product
+                            },
+                            onAdjustStock = {
+                                productForStockAdjustment = product
                             }
                         )
                     }
@@ -326,7 +344,7 @@ fun ProductScreen(
                             name = name,
                             buyingPrice = buyingPrice,
                             sellingPrice = sellingPrice,
-                            stockQuantity = stock,
+                            stockQuantity = productToEdit!!.stockQuantity,
                             unit = unit,
                             lowStockLimit = lowStockLimit,
                             photoPath = photoPath,
@@ -366,6 +384,35 @@ fun ProductScreen(
             }
         )
     }
+
+    productForBatchDetails?.let { product ->
+        ProductBatchesDialog(
+            product = product,
+            batches = batchesByProduct[product.id].orEmpty(),
+            showCostPrice = role == "OWNER",
+            onDismiss = { productForBatchDetails = null }
+        )
+    }
+
+    productForStockAdjustment?.let { product ->
+        StockAdjustmentDialog(
+            product = product,
+            batches = batchesByProduct[product.id].orEmpty(),
+            isSubmitting = isAdjustingStock,
+            onDismiss = { productForStockAdjustment = null },
+            onConfirm = { batchId, type, quantity, reason, notes ->
+                viewModel.adjustStock(
+                    productId = product.id,
+                    batchId = batchId,
+                    adjustmentType = type,
+                    quantity = quantity,
+                    reason = reason,
+                    notes = notes
+                )
+                productForStockAdjustment = null
+            }
+        )
+    }
 }
 
 /**
@@ -376,10 +423,13 @@ fun ProductScreen(
 @Composable
 private fun ProductItemCard(
     product: ProductEntity,
+    batches: List<InventoryBatchEntity>,
     categoryName: String,
     userRole: String,
     onEditClick: () -> Unit,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    onViewBatches: () -> Unit,
+    onAdjustStock: () -> Unit
 ) {
     val isLowStock = product.stockQuantity <= product.lowStockLimit
 
@@ -465,11 +515,13 @@ private fun ProductItemCard(
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    Text(
-                        text = String.format(Locale.getDefault(), "Cost: Rs.%.2f", product.buyingPrice),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (userRole == "OWNER") {
+                        Text(
+                            text = String.format(Locale.getDefault(), "Cost: Rs.%.2f", product.buyingPrice),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
 
                 // Stock Info & Low Stock Badge
@@ -517,8 +569,255 @@ private fun ProductItemCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+
+            val activeBatchCount = batches.count { it.remainingQuantity > 0 }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                if (userRole == "OWNER" && batches.isNotEmpty()) {
+                    TextButton(onClick = onAdjustStock) {
+                        Text("Adjust Stock")
+                    }
+                }
+                TextButton(onClick = onViewBatches) {
+                    Text(
+                        text = "View Batches ($activeBatchCount active)",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun StockAdjustmentDialog(
+    product: ProductEntity,
+    batches: List<InventoryBatchEntity>,
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (batchId: Int, type: String, quantity: Double, reason: String, notes: String?) -> Unit
+) {
+    var adjustmentType by remember { mutableStateOf("DECREASE") }
+    var selectedBatchId by remember { mutableStateOf(batches.firstOrNull { it.remainingQuantity > 0 }?.id) }
+    var quantityText by remember { mutableStateOf("") }
+    var reasonText by remember { mutableStateOf("") }
+    var notesText by remember { mutableStateOf("") }
+    var validationMessage by remember { mutableStateOf<String?>(null) }
+
+    val selectableBatches = if (adjustmentType == "DECREASE") {
+        batches.filter { it.remainingQuantity > 0 }
+    } else {
+        batches
+    }
+
+    LaunchedEffect(adjustmentType, batches) {
+        if (selectableBatches.none { it.id == selectedBatchId }) {
+            selectedBatchId = selectableBatches.firstOrNull()?.id
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        title = { Text("Adjust ${product.name} Stock") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Choose the exact batch. Product total stock will be recalculated automatically.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = adjustmentType == "DECREASE",
+                        onClick = { adjustmentType = "DECREASE" },
+                        label = { Text("Decrease") }
+                    )
+                    FilterChip(
+                        selected = adjustmentType == "INCREASE",
+                        onClick = { adjustmentType = "INCREASE" },
+                        label = { Text("Increase") }
+                    )
+                }
+
+                if (selectableBatches.isEmpty()) {
+                    Text(
+                        if (adjustmentType == "DECREASE") {
+                            "No batch has stock available to decrease."
+                        } else {
+                            "No batch exists. Add stock from the Restock screen first."
+                        },
+                        color = MaterialTheme.colorScheme.error
+                    )
+                } else {
+                    Text("Select batch", fontWeight = FontWeight.SemiBold)
+                    selectableBatches.forEach { batch ->
+                        FilterChip(
+                            selected = selectedBatchId == batch.id,
+                            onClick = { selectedBatchId = batch.id },
+                            label = {
+                                Text(
+                                    "Batch #${batch.id} - ${batch.remainingQuantity} ${product.unit} - " +
+                                        "Cost Rs.${String.format(Locale.getDefault(), "%.2f", batch.unitCost)} - " +
+                                        "Sell Rs.${String.format(Locale.getDefault(), "%.2f", batch.sellingPrice)}"
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = quantityText,
+                    onValueChange = { quantityText = it },
+                    label = { Text("Quantity *") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = reasonText,
+                    onValueChange = { reasonText = it },
+                    label = { Text("Reason *") },
+                    placeholder = { Text("Example: damaged, count correction, return") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = notesText,
+                    onValueChange = { notesText = it },
+                    label = { Text("Notes (Optional)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2
+                )
+                validationMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !isSubmitting && selectableBatches.isNotEmpty(),
+                onClick = {
+                    val batch = selectableBatches.firstOrNull { it.id == selectedBatchId }
+                    val quantity = quantityText.toDoubleOrNull()
+                    validationMessage = when {
+                        batch == null -> "Please select a stock batch."
+                        quantity == null || !quantity.isFinite() || quantity <= 0 ->
+                            "Please enter a quantity greater than zero."
+                        adjustmentType == "DECREASE" && quantity > batch.remainingQuantity ->
+                            "Only ${batch.remainingQuantity} ${product.unit} is available in this batch."
+                        reasonText.isBlank() -> "Please enter a reason."
+                        else -> null
+                    }
+                    if (validationMessage == null && batch != null && quantity != null) {
+                        onConfirm(
+                            batch.id,
+                            adjustmentType,
+                            quantity,
+                            reasonText.trim(),
+                            notesText.trim().ifBlank { null }
+                        )
+                    }
+                }
+            ) {
+                Text(if (isSubmitting) "Saving..." else "Save Adjustment")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isSubmitting) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ProductBatchesDialog(
+    product: ProductEntity,
+    batches: List<InventoryBatchEntity>,
+    showCostPrice: Boolean,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${product.name} Batches") },
+        text = {
+            if (batches.isEmpty()) {
+                Text("No stock batches are recorded for this product.")
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(items = batches, key = { it.id }) { batch ->
+                        val batchDate = remember(batch.receivedAt) {
+                            SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+                                .format(Date(batch.receivedAt))
+                        }
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "Batch #${batch.id}",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = if (batch.remainingQuantity > 0) "ACTIVE" else "EXHAUSTED",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (batch.remainingQuantity > 0) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.outline
+                                        }
+                                    )
+                                }
+                                Text(
+                                    text = "Remaining: ${batch.remainingQuantity} ${product.unit} • Total received: ${batch.originalQuantity} ${product.unit}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    text = if (showCostPrice) {
+                                        "Cost Rs.${String.format(Locale.getDefault(), "%.2f", batch.unitCost)} • " +
+                                            "Sell Rs.${String.format(Locale.getDefault(), "%.2f", batch.sellingPrice)}"
+                                    } else {
+                                        "Sell Rs.${String.format(Locale.getDefault(), "%.2f", batch.sellingPrice)}"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    text = "Last restocked: $batchDate",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
 
 /**
@@ -819,8 +1118,16 @@ private fun AddEditProductDialog(
                     ) {
                         OutlinedTextField(
                             value = stockText,
-                            onValueChange = { stockText = it },
-                            label = { Text("Initial Stock *") },
+                            onValueChange = { if (product == null) stockText = it },
+                            label = {
+                                Text(if (product == null) "Initial Stock *" else "Current Stock (batch-controlled)")
+                            },
+                            readOnly = product != null,
+                            supportingText = if (product != null) {
+                                { Text("Use Adjust Stock or Restock to change quantity.") }
+                            } else {
+                                null
+                            },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.weight(1f),
                             singleLine = true
@@ -894,7 +1201,11 @@ private fun AddEditProductDialog(
                             val category = selectedCategory
                             val buyingPrice = buyingPriceText.toDoubleOrNull()
                             val sellingPrice = sellingPriceText.toDoubleOrNull()
-                            val stock = stockText.toDoubleOrNull()
+                            val stock = if (product == null) {
+                                stockText.toDoubleOrNull()
+                            } else {
+                                product.stockQuantity
+                            }
                             val lowStockLimit = lowStockLimitText.toDoubleOrNull() ?: 5.0
 
                             when {

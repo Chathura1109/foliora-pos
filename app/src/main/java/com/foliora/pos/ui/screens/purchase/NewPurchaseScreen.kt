@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -66,10 +68,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.SupplierEntity
+import com.foliora.pos.data.local.entity.priceToCents
 import com.foliora.pos.ui.components.ErrorDialog
 import com.foliora.pos.ui.components.FolioraTopAppBar
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
@@ -89,6 +95,7 @@ fun NewPurchaseScreen(
 ) {
     val products by viewModel.products.collectAsStateWithLifecycle()
     val suppliers by viewModel.suppliers.collectAsStateWithLifecycle()
+    val inventoryBatches by viewModel.inventoryBatches.collectAsStateWithLifecycle()
     val cartItems by viewModel.cartItems.collectAsStateWithLifecycle()
     val selectedSupplier by viewModel.selectedSupplier.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
@@ -96,15 +103,18 @@ fun NewPurchaseScreen(
 
     NewPurchaseScreenContent(
         products = products,
+        inventoryBatches = inventoryBatches,
         suppliers = suppliers,
         cartItems = cartItems,
         selectedSupplier = selectedSupplier,
         isProcessing = isProcessing,
         errorMessage = errorMessage,
         onBackClick = onBackClick,
-        onAddToCart = { product, qty, buyingPrice -> viewModel.addToCart(product, qty, buyingPrice) },
-        onRemoveFromCart = { product -> viewModel.removeFromCart(product) },
-        onUpdateQuantity = { product, qty -> viewModel.updateQuantity(product, qty) },
+        onAddToCart = { product, batch, qty, buyingPrice, sellingPrice ->
+            viewModel.addToCart(product, batch, qty, buyingPrice, sellingPrice)
+        },
+        onRemoveFromCart = viewModel::removeFromCart,
+        onUpdateQuantity = viewModel::updateQuantity,
         onSelectSupplier = { supplier -> viewModel.selectSupplier(supplier) },
         onCheckout = { viewModel.checkout(onSuccess = onCheckoutSuccess) },
         onDismissError = { viewModel.clearErrorMessage() }
@@ -120,15 +130,16 @@ fun NewPurchaseScreen(
 @Composable
 fun NewPurchaseScreenContent(
     products: List<ProductEntity>,
+    inventoryBatches: List<InventoryBatchEntity>,
     suppliers: List<SupplierEntity>,
     cartItems: List<PurchaseCartItem>,
     selectedSupplier: SupplierEntity?,
     isProcessing: Boolean,
     errorMessage: String?,
     onBackClick: () -> Unit,
-    onAddToCart: (ProductEntity, Double, Double) -> Unit,
-    onRemoveFromCart: (ProductEntity) -> Unit,
-    onUpdateQuantity: (ProductEntity, Double) -> Unit,
+    onAddToCart: (ProductEntity, InventoryBatchEntity?, Double, Double, Double) -> Unit,
+    onRemoveFromCart: (PurchaseCartItem) -> Unit,
+    onUpdateQuantity: (PurchaseCartItem, Double) -> Unit,
     onSelectSupplier: (SupplierEntity?) -> Unit,
     onCheckout: () -> Unit,
     onDismissError: () -> Unit,
@@ -152,6 +163,9 @@ fun NewPurchaseScreenContent(
     // Calculate grand total of restock order
     val grandTotal = remember(cartItems) {
         cartItems.sumOf { it.subtotal }
+    }
+    val batchesByProduct = remember(inventoryBatches) {
+        inventoryBatches.groupBy { it.productId }
     }
 
     Scaffold(
@@ -234,6 +248,9 @@ fun NewPurchaseScreenContent(
                             RestockProductCard(
                                 product = product,
                                 isInCart = inCart,
+                                batchCount = batchesByProduct[product.id]
+                                    .orEmpty()
+                                    .count { it.remainingQuantity > 0 },
                                 onClick = { productForRestockDialog = product }
                             )
                         }
@@ -360,12 +377,12 @@ fun NewPurchaseScreenContent(
                     ) {
                         items(
                             items = cartItems,
-                            key = { it.product.id }
+                            key = { it.lineKey }
                         ) { item ->
                             PurchaseCartItemRow(
                                 cartItem = item,
-                                onUpdateQuantity = { qty -> onUpdateQuantity(item.product, qty) },
-                                onRemove = { onRemoveFromCart(item.product) }
+                                onUpdateQuantity = { qty -> onUpdateQuantity(item, qty) },
+                                onRemove = { onRemoveFromCart(item) }
                             )
                         }
                     }
@@ -438,15 +455,18 @@ fun NewPurchaseScreenContent(
 
     // Product Restock Dialog for Quantity and Custom Buying Price Input
     if (productForRestockDialog != null) {
-        val existingCartItem = cartItems.find { it.product.id == productForRestockDialog!!.id }
+        val existingCartItem = cartItems.lastOrNull { it.product.id == productForRestockDialog!!.id }
         val initialBuyingPrice = existingCartItem?.buyingPrice ?: productForRestockDialog!!.buyingPrice
+        val initialSellingPrice = existingCartItem?.sellingPrice ?: productForRestockDialog!!.sellingPrice
 
         AddToRestockDialog(
             product = productForRestockDialog!!,
+            batches = batchesByProduct[productForRestockDialog!!.id].orEmpty(),
             initialBuyingPrice = initialBuyingPrice,
+            initialSellingPrice = initialSellingPrice,
             onDismiss = { productForRestockDialog = null },
-            onConfirm = { quantity, buyingPrice ->
-                onAddToCart(productForRestockDialog!!, quantity, buyingPrice)
+            onConfirm = { batch, quantity, buyingPrice, sellingPrice ->
+                onAddToCart(productForRestockDialog!!, batch, quantity, buyingPrice, sellingPrice)
                 productForRestockDialog = null
             }
         )
@@ -469,6 +489,7 @@ fun NewPurchaseScreenContent(
 private fun RestockProductCard(
     product: ProductEntity,
     isInCart: Boolean,
+    batchCount: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -530,6 +551,12 @@ private fun RestockProductCard(
                 color = MaterialTheme.colorScheme.primary
             )
 
+            Text(
+                text = "$batchCount active price ${if (batchCount == 1) "batch" else "batches"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
@@ -557,6 +584,9 @@ private fun PurchaseCartItemRow(
     val formattedBuyingPrice = remember(cartItem.buyingPrice) {
         String.format(Locale.getDefault(), "Rs.%.2f", cartItem.buyingPrice)
     }
+    val formattedSellingPrice = remember(cartItem.sellingPrice) {
+        String.format(Locale.getDefault(), "Rs.%.2f", cartItem.sellingPrice)
+    }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -583,9 +613,15 @@ private fun PurchaseCartItemRow(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "@ $formattedBuyingPrice / ${cartItem.product.unit}",
+                    text = "Buy $formattedBuyingPrice • Sell $formattedSellingPrice / ${cartItem.product.unit}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline
+                )
+                Text(
+                    text = cartItem.batchId?.let { "Restock Batch #$it" }
+                        ?: "New price batch",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
                 )
             }
 
@@ -733,13 +769,46 @@ private fun SupplierDropdownMenu(
 @Composable
 private fun AddToRestockDialog(
     product: ProductEntity,
+    batches: List<InventoryBatchEntity>,
     initialBuyingPrice: Double,
+    initialSellingPrice: Double,
     onDismiss: () -> Unit,
-    onConfirm: (quantity: Double, buyingPrice: Double) -> Unit
+    onConfirm: (
+        batch: InventoryBatchEntity?,
+        quantity: Double,
+        buyingPrice: Double,
+        sellingPrice: Double
+    ) -> Unit
 ) {
     var quantityText by remember { mutableStateOf("1") }
     var buyingPriceText by remember { mutableStateOf(String.format(Locale.US, "%.2f", initialBuyingPrice)) }
+    var sellingPriceText by remember { mutableStateOf(String.format(Locale.US, "%.2f", initialSellingPrice)) }
     var inputError by remember { mutableStateOf<String?>(null) }
+    var selectedBatchId by remember(product.id, batches) {
+        mutableStateOf(
+            batches.firstOrNull {
+                it.unitCostCents == priceToCents(initialBuyingPrice) &&
+                    it.sellingPriceCents == priceToCents(initialSellingPrice)
+            }?.id
+        )
+    }
+    val matchingBatch = remember(batches, selectedBatchId, buyingPriceText, sellingPriceText) {
+        val buyingPrice = buyingPriceText.toDoubleOrNull()
+        val sellingPrice = sellingPriceText.toDoubleOrNull()
+        if (buyingPrice == null || sellingPrice == null) {
+            null
+        } else {
+            val costCents = priceToCents(buyingPrice)
+            val sellCents = priceToCents(sellingPrice)
+            batches.firstOrNull {
+                it.id == selectedBatchId &&
+                    it.unitCostCents == costCents &&
+                    it.sellingPriceCents == sellCents
+            } ?: batches.firstOrNull {
+                it.unitCostCents == costCents && it.sellingPriceCents == sellCents
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -758,6 +827,82 @@ private fun AddToRestockDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
+                )
+
+                Text(
+                    text = "Select an existing price batch",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                if (batches.isEmpty()) {
+                    Text(
+                        text = "No previous batches. Enter prices below to create the first batch.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 170.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(items = batches, key = { it.id }) { batch ->
+                            val batchDate = remember(batch.receivedAt) {
+                                SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+                                    .format(Date(batch.receivedAt))
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedBatchId = batch.id
+                                        buyingPriceText = String.format(Locale.US, "%.2f", batch.unitCost)
+                                        sellingPriceText = String.format(Locale.US, "%.2f", batch.sellingPrice)
+                                        inputError = null
+                                    }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = matchingBatch?.id == batch.id,
+                                    onClick = {
+                                        selectedBatchId = batch.id
+                                        buyingPriceText = String.format(Locale.US, "%.2f", batch.unitCost)
+                                        sellingPriceText = String.format(Locale.US, "%.2f", batch.sellingPrice)
+                                        inputError = null
+                                    }
+                                )
+                                Column {
+                                    Text(
+                                        text = "Batch #${batch.id} — ${batch.remainingQuantity} ${product.unit}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "Cost Rs.${String.format(Locale.getDefault(), "%.2f", batch.unitCost)} • Sell Rs.${String.format(Locale.getDefault(), "%.2f", batch.sellingPrice)} • $batchDate",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = matchingBatch?.let {
+                        "Batch #${it.id} will be restocked"
+                    } ?: "Different price detected — a new batch will be created",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (matchingBatch != null) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.tertiary
+                    },
+                    modifier = Modifier.padding(vertical = 6.dp)
                 )
 
                 // Restock Quantity Input Field
@@ -781,9 +926,26 @@ private fun AddToRestockDialog(
                     value = buyingPriceText,
                     onValueChange = {
                         buyingPriceText = it
+                        selectedBatchId = null
                         inputError = null
                     },
                     label = { Text("Unit Buying Price (Rs.)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(8.dp)
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                OutlinedTextField(
+                    value = sellingPriceText,
+                    onValueChange = {
+                        sellingPriceText = it
+                        selectedBatchId = null
+                        inputError = null
+                    },
+                    label = { Text("Unit Selling Price (Rs.)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
@@ -804,18 +966,23 @@ private fun AddToRestockDialog(
             Button(
                 onClick = {
                     val qty = quantityText.toDoubleOrNull()
-                    val price = buyingPriceText.toDoubleOrNull()
+                    val buyingPrice = buyingPriceText.toDoubleOrNull()
+                    val sellingPrice = sellingPriceText.toDoubleOrNull()
 
-                    if (qty == null || qty <= 0) {
+                    if (qty == null || !qty.isFinite() || qty <= 0) {
                         inputError = "Please enter a valid quantity > 0"
                         return@Button
                     }
-                    if (price == null || price < 0) {
+                    if (buyingPrice == null || !buyingPrice.isFinite() || buyingPrice < 0) {
                         inputError = "Please enter a valid buying price >= 0"
                         return@Button
                     }
+                    if (sellingPrice == null || !sellingPrice.isFinite() || sellingPrice < 0) {
+                        inputError = "Please enter a valid selling price >= 0"
+                        return@Button
+                    }
 
-                    onConfirm(qty, price)
+                    onConfirm(matchingBatch, qty, buyingPrice, sellingPrice)
                 }
             ) {
                 Text("Add to Restock")

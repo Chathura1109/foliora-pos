@@ -2,9 +2,11 @@ package com.foliora.pos.data.repository
 
 import androidx.room.withTransaction
 import com.foliora.pos.data.local.FolioraDatabase
+import com.foliora.pos.data.local.dao.InventoryBatchDao
 import com.foliora.pos.data.local.dao.ProductDao
 import com.foliora.pos.data.local.dao.SaleDao
 import com.foliora.pos.data.local.dao.SaleItemDao
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.SaleEntity
 import com.foliora.pos.data.local.entity.SaleItemEntity
@@ -28,7 +30,8 @@ class SaleRepository @Inject constructor(
     private val database: FolioraDatabase,
     private val saleDao: SaleDao,
     private val saleItemDao: SaleItemDao,
-    private val productDao: ProductDao
+    private val productDao: ProductDao,
+    private val inventoryBatchDao: InventoryBatchDao
 ) {
     private val firestore = FirebaseFirestore.getInstance()
 
@@ -196,12 +199,52 @@ class SaleRepository @Inject constructor(
                 require(item.subtotal.isFinite() && item.subtotal >= 0) {
                     "Subtotal for product $productId must be a valid number"
                 }
+                require(item.unitCost.isFinite() && item.unitCost >= 0) {
+                    "Cost for product $productId must be a valid number"
+                }
                 item.quantity
             }.also { totalQuantity ->
                 require(totalQuantity.isFinite()) {
                     "Total quantity for product $productId must be a valid number"
                 }
             }
+        }
+
+        val quantitiesByBatch = items.groupBy { item ->
+            requireNotNull(item.batchId) { "Select a stock batch for every cart item" }
+        }.mapValues { (batchId, batchItems) ->
+            batchItems.sumOf { it.quantity }.also { totalQuantity ->
+                require(totalQuantity.isFinite() && totalQuantity > 0) {
+                    "Quantity for batch $batchId must be valid"
+                }
+            }
+        }
+
+        val batchesById = mutableMapOf<Int, InventoryBatchEntity>()
+        for ((batchId, requestedQuantity) in quantitiesByBatch) {
+            val batch = requireNotNull(inventoryBatchDao.getBatchById(batchId)) {
+                "Selected stock batch $batchId no longer exists"
+            }
+            require(batch.remainingQuantity.isFinite() && batch.remainingQuantity >= 0) {
+                "Stock batch $batchId has an invalid remaining quantity"
+            }
+            require(requestedQuantity <= batch.remainingQuantity) {
+                "Only ${batch.remainingQuantity} units remain in the selected batch"
+            }
+            require(batch.unitCost.isFinite() && batch.unitCost >= 0) {
+                "Selected stock batch has an invalid cost"
+            }
+            require(batch.sellingPrice.isFinite() && batch.sellingPrice >= 0) {
+                "Selected stock batch has an invalid selling price"
+            }
+            require(!batch.firebaseId.isNullOrBlank() && batch.isSynced) {
+                "Selected stock batch is not synced. Sync inventory before checkout"
+            }
+            val itemProductIds = items.filter { it.batchId == batchId }.map { it.productId }.distinct()
+            require(itemProductIds.size == 1 && itemProductIds.single() == batch.productId) {
+                "Selected batch does not belong to the cart product"
+            }
+            batchesById[batchId] = batch
         }
 
         val productsById = mutableMapOf<Int, ProductEntity>()
@@ -224,9 +267,11 @@ class SaleRepository @Inject constructor(
             productsById[productId] = product
         }
 
-        val confirmedStockByProduct = confirmAndDeductFirestoreStock(
+        val confirmedInventory = confirmAndDeductFirestoreStock(
             productsById = productsById,
             quantitiesByProduct = quantitiesByProduct,
+            batchesById = batchesById,
+            quantitiesByBatch = quantitiesByBatch,
             updatedAt = now
         )
 
@@ -240,8 +285,12 @@ class SaleRepository @Inject constructor(
 
             // Step b: Set each item's saleId to the generated ID and update timestamp
             val itemsWithSaleId = items.map { item ->
+                val batch = batchesById.getValue(requireNotNull(item.batchId))
                 item.copy(
                     saleId = generatedSaleId,
+                    unitCost = batch.unitCost,
+                    sellingPrice = batch.sellingPrice,
+                    subtotal = batch.sellingPrice * item.quantity,
                     updatedAt = now
                 )
             }
@@ -250,7 +299,20 @@ class SaleRepository @Inject constructor(
             saleItemDao.insertSaleItems(itemsWithSaleId)
 
             // Step d: Store the exact stock quantities committed by Firestore.
-            for ((productId, confirmedStock) in confirmedStockByProduct) {
+            for ((batchId, confirmedRemaining) in confirmedInventory.batchRemaining) {
+                val batch = requireNotNull(inventoryBatchDao.getBatchById(batchId)) {
+                    "Stock batch $batchId no longer exists"
+                }
+                inventoryBatchDao.updateBatch(
+                    batch.copy(
+                        remainingQuantity = confirmedRemaining,
+                        isSynced = true,
+                        updatedAt = now
+                    )
+                )
+            }
+
+            for ((productId, confirmedStock) in confirmedInventory.productStock) {
                 val product = requireNotNull(productDao.getProductById(productId)) {
                     "Product $productId no longer exists"
                 }
@@ -277,21 +339,29 @@ class SaleRepository @Inject constructor(
     private suspend fun confirmAndDeductFirestoreStock(
         productsById: Map<Int, ProductEntity>,
         quantitiesByProduct: Map<Int, Double>,
+        batchesById: Map<Int, InventoryBatchEntity>,
+        quantitiesByBatch: Map<Int, Double>,
         updatedAt: Long
-    ): Map<Int, Double> {
+    ): ConfirmedInventory {
         val referencesByProductId = productsById.mapValues { (_, product) ->
             firestore.collection(PRODUCTS_COLLECTION).document(requireNotNull(product.firebaseId))
+        }
+        val referencesByBatchId = batchesById.mapValues { (_, batch) ->
+            firestore.collection(BATCHES_COLLECTION).document(requireNotNull(batch.firebaseId))
         }
 
         return try {
             firestore.runTransaction { transaction ->
                 // Firestore requires every read to happen before the first write.
-                val snapshotsByProductId = referencesByProductId.mapValues { (_, reference) ->
+                val productSnapshots = referencesByProductId.mapValues { (_, reference) ->
+                    transaction.get(reference)
+                }
+                val batchSnapshots = referencesByBatchId.mapValues { (_, reference) ->
                     transaction.get(reference)
                 }
 
                 val confirmedStockByProduct = mutableMapOf<Int, Double>()
-                for ((productId, snapshot) in snapshotsByProductId) {
+                for ((productId, snapshot) in productSnapshots) {
                     val product = productsById.getValue(productId)
                     require(snapshot.exists()) {
                         "${product.name} does not exist in Firebase. Sync products before checkout"
@@ -309,6 +379,27 @@ class SaleRepository @Inject constructor(
                     confirmedStockByProduct[productId] = cloudStock - requestedQuantity
                 }
 
+                val confirmedRemainingByBatch = mutableMapOf<Int, Double>()
+                for ((batchId, snapshot) in batchSnapshots) {
+                    val batch = batchesById.getValue(batchId)
+                    require(snapshot.exists()) {
+                        "Selected stock batch does not exist in Firebase. Sync inventory first"
+                    }
+                    val cloudRemaining = (snapshot.get("remainingQuantity") as? Number)?.toDouble()
+                    require(cloudRemaining != null && cloudRemaining.isFinite() && cloudRemaining >= 0) {
+                        "Firebase stock batch quantity is invalid"
+                    }
+                    val expectedProductFirebaseId = productsById.getValue(batch.productId).firebaseId
+                    require(snapshot.getString("productFirebaseId") == expectedProductFirebaseId) {
+                        "Firebase stock batch belongs to a different product"
+                    }
+                    val requestedQuantity = quantitiesByBatch.getValue(batchId)
+                    require(requestedQuantity <= cloudRemaining) {
+                        "Only $cloudRemaining units remain in the selected stock batch"
+                    }
+                    confirmedRemainingByBatch[batchId] = cloudRemaining - requestedQuantity
+                }
+
                 for ((productId, confirmedStock) in confirmedStockByProduct) {
                     transaction.update(
                         referencesByProductId.getValue(productId),
@@ -319,7 +410,20 @@ class SaleRepository @Inject constructor(
                     )
                 }
 
-                confirmedStockByProduct.toMap()
+                for ((batchId, confirmedRemaining) in confirmedRemainingByBatch) {
+                    transaction.update(
+                        referencesByBatchId.getValue(batchId),
+                        mapOf<String, Any>(
+                            "remainingQuantity" to confirmedRemaining,
+                            "updatedAt" to updatedAt
+                        )
+                    )
+                }
+
+                ConfirmedInventory(
+                    productStock = confirmedStockByProduct.toMap(),
+                    batchRemaining = confirmedRemainingByBatch.toMap()
+                )
             }.await()
         } catch (e: FirebaseFirestoreException) {
             val message = when (e.code) {
@@ -339,5 +443,11 @@ class SaleRepository @Inject constructor(
 
     private companion object {
         const val PRODUCTS_COLLECTION = "products"
+        const val BATCHES_COLLECTION = "inventory_batches"
     }
+
+    private data class ConfirmedInventory(
+        val productStock: Map<Int, Double>,
+        val batchRemaining: Map<Int, Double>
+    )
 }
