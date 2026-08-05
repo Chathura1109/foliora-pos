@@ -96,31 +96,40 @@ class LoginViewModel @Inject constructor(
 
                 if (firebaseUser != null) {
                     val uid = firebaseUser.uid
-
-                    // Check if user already exists in local database by Firebase UID
                     val existingUser = userRepository.getUserByFirebaseUid(uid)
-
-                    if (existingUser == null) {
-                        // Fetch user profile document from Firestore "users" collection
-                        val docSnapshot = firestore.collection("users").document(uid).get().await()
-
-                        val name = docSnapshot.getString("name")
-                            ?: firebaseUser.displayName
-                            ?: firebaseUser.email?.substringBefore("@")
-                            ?: "POS User"
-                        val role = docSnapshot.getString("role") ?: "CASHIER"
-
-                        // Create local user entity and insert into Room DB
-                        val newUser = UserEntity(
-                            name = name,
-                            role = role,
-                            firebaseAuthUid = uid,
-                            firebaseId = uid,
-                            isSynced = true,
-                            isActive = true
-                        )
-                        userRepository.insertUser(newUser)
+                    val docSnapshot = firestore.collection("users").document(uid).get().await()
+                    check(docSnapshot.exists()) {
+                        "No user profile exists for this account"
                     }
+
+                    val name = docSnapshot.getString("name")
+                        ?: firebaseUser.displayName
+                        ?: firebaseUser.email?.substringBefore("@")
+                        ?: "POS User"
+                    val role = docSnapshot.getString("role")
+                        ?.trim()
+                        ?.uppercase()
+                    check(role == "OWNER" || role == "CASHIER") {
+                        "User role must be OWNER or CASHIER"
+                    }
+
+                    val localUser = existingUser?.copy(
+                        name = name,
+                        role = role,
+                        firebaseAuthUid = uid,
+                        firebaseId = uid,
+                        isSynced = true,
+                        isActive = true,
+                        updatedAt = System.currentTimeMillis()
+                    ) ?: UserEntity(
+                        name = name,
+                        role = role,
+                        firebaseAuthUid = uid,
+                        firebaseId = uid,
+                        isSynced = true,
+                        isActive = true
+                    )
+                    userRepository.insertUser(localUser)
 
                     _isLoginSuccess.value = true
                 } else {

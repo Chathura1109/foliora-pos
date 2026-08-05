@@ -275,7 +275,7 @@ private fun CameraContent(
 }
 
 /**
- * Executes photo capture on [ImageCapture] and saves output file to application cache directory.
+ * Executes photo capture on [ImageCapture] and saves output file to permanent app storage.
  */
 private fun takePhoto(
     context: Context,
@@ -283,10 +283,11 @@ private fun takePhoto(
     onPhotoCaptured: (String) -> Unit,
     onError: (ImageCaptureException) -> Unit
 ) {
-    // Generate unique file name in cache directory
+    // Keep captured product photos until the product is synced or explicitly replaced.
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(System.currentTimeMillis())
+    val productPhotoDirectory = File(context.filesDir, "product_photos").apply { mkdirs() }
     val photoFile = File(
-        context.cacheDir,
+        productPhotoDirectory,
         "JPEG_${timeStamp}_product.jpg"
     )
 

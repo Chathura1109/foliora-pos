@@ -41,6 +41,9 @@ interface ProductDao {
     @Query("SELECT * FROM products WHERE id = :id")
     suspend fun getProductById(id: Int): ProductEntity?
 
+    @Query("SELECT * FROM products WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getProductByFirebaseId(firebaseId: String): ProductEntity?
+
     /**
      * Observes all products in the system.
      */
