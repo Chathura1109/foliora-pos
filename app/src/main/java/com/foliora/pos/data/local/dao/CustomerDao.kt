@@ -40,6 +40,9 @@ interface CustomerDao {
     @Query("SELECT * FROM customers WHERE id = :id")
     suspend fun getCustomerById(id: Int): CustomerEntity?
 
+    @Query("SELECT * FROM customers WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getCustomerByFirebaseId(firebaseId: String): CustomerEntity?
+
     /**
      * Observes all registered customers sorted by name.
      */

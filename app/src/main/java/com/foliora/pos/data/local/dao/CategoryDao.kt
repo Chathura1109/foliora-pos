@@ -47,6 +47,9 @@ interface CategoryDao {
     @Query("SELECT * FROM categories WHERE id = :id")
     suspend fun getCategoryById(id: Int): CategoryEntity?
 
+    @Query("SELECT * FROM categories WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getCategoryByFirebaseId(firebaseId: String): CategoryEntity?
+
     /**
      * Observes all categories sorted alphabetically by name.
      */

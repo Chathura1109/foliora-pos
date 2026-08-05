@@ -46,6 +46,9 @@ interface SupplierDao {
     @Query("SELECT * FROM suppliers WHERE id = :id")
     suspend fun getSupplierById(id: Int): SupplierEntity?
 
+    @Query("SELECT * FROM suppliers WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getSupplierByFirebaseId(firebaseId: String): SupplierEntity?
+
     /**
      * Observes all suppliers in the database ordered alphabetically by name.
      */

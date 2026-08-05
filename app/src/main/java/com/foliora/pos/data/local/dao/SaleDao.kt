@@ -40,6 +40,9 @@ interface SaleDao {
     @Query("SELECT * FROM sales WHERE id = :id")
     suspend fun getSaleById(id: Int): SaleEntity?
 
+    @Query("SELECT * FROM sales WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getSaleByFirebaseId(firebaseId: String): SaleEntity?
+
     /**
      * Observes all sales transactions ordered newest first.
      */

@@ -4,6 +4,16 @@ import android.database.sqlite.SQLiteConstraintException
 import com.foliora.pos.data.local.dao.ProductDao
 import com.foliora.pos.data.local.entity.ProductEntity
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.DataOutputStream
+import java.io.File
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLConnection
+import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -98,5 +108,86 @@ class ProductRepository @Inject constructor(
      */
     suspend fun getUnsyncedProducts(): List<ProductEntity> {
         return productDao.getUnsyncedProducts()
+    }
+
+    /**
+     * Uploads a device-local product photo to Cloudinary and returns the Firestore-safe product copy.
+     * The Room entity keeps its local path so the photo remains available offline.
+     */
+    suspend fun prepareProductForCloud(product: ProductEntity): ProductEntity {
+        val photoPath = product.photoPath?.takeIf(String::isNotBlank) ?: return product
+        if (photoPath.startsWith("https://") || photoPath.startsWith("http://")) return product
+
+        val photoFile = File(photoPath)
+        if (!photoFile.isFile) return product.copy(photoPath = null)
+
+        require(photoFile.length() <= MAX_CLOUDINARY_IMAGE_BYTES) {
+            "Product photo must be smaller than 10 MB"
+        }
+        val downloadUrl = uploadProductPhotoToCloudinary(photoFile)
+        return product.copy(photoPath = downloadUrl)
+    }
+
+    private suspend fun uploadProductPhotoToCloudinary(photoFile: File): String =
+        withContext(Dispatchers.IO) {
+            val boundary = "FolioraBoundary${UUID.randomUUID()}"
+            val connection = URL(CLOUDINARY_UPLOAD_URL).openConnection() as HttpURLConnection
+
+            try {
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 30_000
+                connection.setChunkedStreamingMode(0)
+                connection.setRequestProperty("Accept", "application/json")
+                connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+
+                DataOutputStream(connection.outputStream).use { output ->
+                    output.writeMultipartText(boundary, "upload_preset", CLOUDINARY_UPLOAD_PRESET)
+                    output.writeBytes("--$boundary\r\n")
+                    output.writeBytes(
+                        "Content-Disposition: form-data; name=\"file\"; filename=\"${photoFile.name}\"\r\n"
+                    )
+                    val contentType = URLConnection.guessContentTypeFromName(photoFile.name) ?: "image/jpeg"
+                    output.writeBytes("Content-Type: $contentType\r\n\r\n")
+                    photoFile.inputStream().use { input -> input.copyTo(output) }
+                    output.writeBytes("\r\n--$boundary--\r\n")
+                }
+
+                val responseCode = connection.responseCode
+                val responseText = (if (responseCode in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                })?.bufferedReader()?.use { it.readText() }.orEmpty()
+
+                if (responseCode !in 200..299) {
+                    val cloudinaryMessage = runCatching {
+                        JSONObject(responseText).optJSONObject("error")?.optString("message")
+                    }.getOrNull()?.takeIf(String::isNotBlank)
+                    throw IOException(
+                        cloudinaryMessage ?: "Cloudinary image upload failed with HTTP $responseCode"
+                    )
+                }
+
+                JSONObject(responseText).optString("secure_url").takeIf(String::isNotBlank)
+                    ?: throw IOException("Cloudinary did not return an image URL")
+            } finally {
+                connection.disconnect()
+            }
+        }
+
+    private fun DataOutputStream.writeMultipartText(boundary: String, name: String, value: String) {
+        writeBytes("--$boundary\r\n")
+        writeBytes("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+        writeBytes("$value\r\n")
+    }
+
+    private companion object {
+        private const val CLOUDINARY_CLOUD_NAME = "sioylmkz"
+        private const val CLOUDINARY_UPLOAD_PRESET = "foliora_product_images"
+        private const val CLOUDINARY_UPLOAD_URL =
+            "https://api.cloudinary.com/v1_1/$CLOUDINARY_CLOUD_NAME/image/upload"
+        private const val MAX_CLOUDINARY_IMAGE_BYTES = 10L * 1024L * 1024L
     }
 }

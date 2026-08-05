@@ -46,6 +46,9 @@ interface SaleItemDao {
     @Query("SELECT * FROM sale_items WHERE saleId = :saleId")
     fun getItemsBySaleId(saleId: Int): Flow<List<SaleItemEntity>>
 
+    @Query("SELECT * FROM sale_items WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getSaleItemByFirebaseId(firebaseId: String): SaleItemEntity?
+
     /**
      * Retrieves sale items that are pending sync.
      */

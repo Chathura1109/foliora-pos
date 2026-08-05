@@ -40,6 +40,9 @@ interface PurchaseDao {
     @Query("SELECT * FROM purchases WHERE id = :id")
     suspend fun getPurchaseById(id: Int): PurchaseEntity?
 
+    @Query("SELECT * FROM purchases WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getPurchaseByFirebaseId(firebaseId: String): PurchaseEntity?
+
     /**
      * Observes all purchase transactions ordered by creation timestamp descending.
      */

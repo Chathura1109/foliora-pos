@@ -46,6 +46,9 @@ interface PurchaseItemDao {
     @Query("SELECT * FROM purchase_items WHERE purchaseId = :purchaseId")
     fun getItemsByPurchaseId(purchaseId: Int): Flow<List<PurchaseItemEntity>>
 
+    @Query("SELECT * FROM purchase_items WHERE firebaseId = :firebaseId LIMIT 1")
+    suspend fun getPurchaseItemByFirebaseId(firebaseId: String): PurchaseItemEntity?
+
     /**
      * Retrieves purchase item records that need remote synchronization.
      */

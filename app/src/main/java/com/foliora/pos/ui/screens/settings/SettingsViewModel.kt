@@ -8,10 +8,15 @@ import com.foliora.pos.data.local.FolioraDatabase
 import com.foliora.pos.data.local.dao.PendingDeletionDao
 import com.foliora.pos.data.local.entity.*
 import com.foliora.pos.data.repository.*
+import com.foliora.pos.data.sync.SyncCheckpointStore
+import com.foliora.pos.data.sync.SyncExecutionGuard
+import com.foliora.pos.data.sync.SyncRelationshipMapper
 import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,7 +40,10 @@ class SettingsViewModel @Inject constructor(
     private val supplierRepository: SupplierRepository,
     private val purchaseRepository: PurchaseRepository,
     private val database: FolioraDatabase,
-    private val pendingDeletionDao: PendingDeletionDao
+    private val pendingDeletionDao: PendingDeletionDao,
+    private val syncCheckpointStore: SyncCheckpointStore,
+    private val syncExecutionGuard: SyncExecutionGuard,
+    private val syncRelationshipMapper: SyncRelationshipMapper
 ) : ViewModel() {
 
     private val _settings = MutableStateFlow<SettingEntity?>(null)
@@ -89,45 +97,32 @@ class SettingsViewModel @Inject constructor(
      */
     fun syncNow() {
         if (_isSyncing.value) return
+        _isSyncing.value = true
         viewModelScope.launch {
-            _isSyncing.value = true
-            _syncStatus.value = "Starting sync..."
-            val firestore = FirebaseFirestore.getInstance()
-            val errors = mutableListOf<String>()
-
             try {
-                _syncStatus.value = "Deleting cloud records..."
-                processPendingDeletions(firestore)
+                if (syncExecutionGuard.isRunning) {
+                    _syncStatus.value = "Waiting for current sync to finish..."
+                }
+                syncExecutionGuard.runExclusive {
+                    performManualSync()
+                }
+            } finally {
+                _isSyncing.value = false
+            }
+        }
+    }
 
-                // ============ PUSH (local -> cloud) ============
-                _syncStatus.value = "Pushing sales..."
-                pushCollection(firestore, "sales", saleRepository.getUnsyncedSales(),
-                    { it.id }, { it.firebaseId },
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    saleRepository::updateSale,
-                    { saleRepository.updateSale(it.copy(isSynced = true)) }, errors)
+    private suspend fun performManualSync() {
+        _syncStatus.value = "Starting sync..."
+        val firestore = FirebaseFirestore.getInstance()
+        val errors = mutableListOf<String>()
+        val syncStartedAt = System.currentTimeMillis()
 
-                _syncStatus.value = "Pushing sale items..."
-                pushCollection(firestore, "sale_items", saleRepository.getUnsyncedSaleItems(),
-                    { it.id }, { it.firebaseId },
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    saleRepository::updateSaleItem,
-                    { saleRepository.updateSaleItem(it.copy(isSynced = true)) }, errors)
+        try {
+            _syncStatus.value = "Deleting cloud records..."
+            processPendingDeletions(firestore)
 
-                _syncStatus.value = "Pushing products..."
-                pushCollection(firestore, "products", productRepository.getUnsyncedProducts(),
-                    { it.id }, { it.firebaseId },
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    productRepository::updateProduct,
-                    { productRepository.updateProduct(it.copy(isSynced = true)) }, errors)
-
-                _syncStatus.value = "Pushing customers..."
-                pushCollection(firestore, "customers", customerRepository.getUnsyncedCustomers(),
-                    { it.id }, { it.firebaseId },
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    customerRepository::updateCustomer,
-                    { customerRepository.updateCustomer(it.copy(isSynced = true)) }, errors)
-
+            // ============ PUSH (local -> cloud) ============
                 _syncStatus.value = "Pushing users..."
                 pushCollection(firestore, "users", userRepository.getUnsyncedUsers(),
                     { it.id },
@@ -137,39 +132,80 @@ class SettingsViewModel @Inject constructor(
                     },
                     { item, firebaseId -> item.copy(firebaseId = firebaseId) },
                     userRepository::updateUser,
-                    { userRepository.updateUser(it.copy(isSynced = true)) }, errors)
+                    { userRepository.updateUser(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::userToCloud)
 
                 _syncStatus.value = "Pushing categories..."
                 pushCollection(firestore, "categories", categoryRepository.getUnsyncedCategories(),
                     { it.id }, { it.firebaseId },
                     { item, firebaseId -> item.copy(firebaseId = firebaseId) },
                     categoryRepository::updateCategory,
-                    { categoryRepository.updateCategory(it.copy(isSynced = true)) }, errors)
+                    { categoryRepository.updateCategory(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::categoryToCloud)
 
                 _syncStatus.value = "Pushing suppliers..."
                 pushCollection(firestore, "suppliers", supplierRepository.getUnsyncedSuppliers(),
                     { it.id }, { it.firebaseId },
                     { item, firebaseId -> item.copy(firebaseId = firebaseId) },
                     supplierRepository::updateSupplier,
-                    { supplierRepository.updateSupplier(it.copy(isSynced = true)) }, errors)
+                    { supplierRepository.updateSupplier(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::supplierToCloud)
+
+                _syncStatus.value = "Pushing customers..."
+                pushCollection(firestore, "customers", customerRepository.getUnsyncedCustomers(),
+                    { it.id }, { it.firebaseId },
+                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+                    customerRepository::updateCustomer,
+                    { customerRepository.updateCustomer(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::customerToCloud)
+
+                _syncStatus.value = "Pushing products..."
+                pushCollection(firestore, "products", productRepository.getUnsyncedProducts(),
+                    { it.id }, { it.firebaseId },
+                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+                    productRepository::updateProduct,
+                    { productRepository.updateProduct(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = { product ->
+                        syncRelationshipMapper.productToCloud(
+                            productRepository.prepareProductForCloud(product)
+                        )
+                    })
 
                 _syncStatus.value = "Pushing purchases..."
                 pushCollection(firestore, "purchases", purchaseRepository.getUnsyncedPurchases(),
                     { it.id }, { it.firebaseId },
                     { item, firebaseId -> item.copy(firebaseId = firebaseId) },
                     purchaseRepository::updatePurchase,
-                    { purchaseRepository.updatePurchase(it.copy(isSynced = true)) }, errors)
+                    { purchaseRepository.updatePurchase(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::purchaseToCloud)
 
                 _syncStatus.value = "Pushing purchase items..."
                 pushCollection(firestore, "purchase_items", purchaseRepository.getUnsyncedPurchaseItems(),
                     { it.id }, { it.firebaseId },
                     { item, firebaseId -> item.copy(firebaseId = firebaseId) },
                     purchaseRepository::updatePurchaseItem,
-                    { purchaseRepository.updatePurchaseItem(it.copy(isSynced = true)) }, errors)
+                    { purchaseRepository.updatePurchaseItem(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::purchaseItemToCloud)
+
+                _syncStatus.value = "Pushing sales..."
+                pushCollection(firestore, "sales", saleRepository.getUnsyncedSales(),
+                    { it.id }, { it.firebaseId },
+                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+                    saleRepository::updateSale,
+                    { saleRepository.updateSale(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::saleToCloud)
+
+                _syncStatus.value = "Pushing sale items..."
+                pushCollection(firestore, "sale_items", saleRepository.getUnsyncedSaleItems(),
+                    { it.id }, { it.firebaseId },
+                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+                    saleRepository::updateSaleItem,
+                    { saleRepository.updateSaleItem(it.copy(isSynced = true)) }, errors,
+                    prepareForCloud = syncRelationshipMapper::saleItemToCloud)
 
                 _syncStatus.value = "Pushing settings..."
                 pushCollection(firestore, "settings", settingRepository.getUnsyncedSettings(),
-                    { it.id }, { it.firebaseId },
+                    { it.id }, { SETTINGS_DOCUMENT_ID },
                     { item, firebaseId -> item.copy(firebaseId = firebaseId) },
                     settingRepository::updateSetting,
                     { settingRepository.updateSetting(it.copy(isSynced = true)) }, errors)
@@ -178,77 +214,101 @@ class SettingsViewModel @Inject constructor(
                 // Pull order respects foreign key dependencies
 
                 _syncStatus.value = "Pulling users..."
-                pullCollection(firestore, "users", UserEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { userRepository.insertUser(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "users", syncRelationshipMapper::userFromCloud,
+                    { userRepository.insertUser(it) }, errors)
 
                 _syncStatus.value = "Pulling categories..."
-                pullCollection(firestore, "categories", CategoryEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { categoryRepository.insertCategory(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "categories", syncRelationshipMapper::categoryFromCloud,
+                    { categoryRepository.insertCategory(it) }, errors)
 
                 _syncStatus.value = "Pulling suppliers..."
-                pullCollection(firestore, "suppliers", SupplierEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { supplierRepository.insertSupplier(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "suppliers", syncRelationshipMapper::supplierFromCloud,
+                    { supplierRepository.insertSupplier(it) }, errors)
 
                 _syncStatus.value = "Pulling customers..."
-                pullCollection(firestore, "customers", CustomerEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { customerRepository.insertCustomer(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "customers", syncRelationshipMapper::customerFromCloud,
+                    { customerRepository.insertCustomer(it) }, errors)
 
                 _syncStatus.value = "Pulling products..."
-                pullCollection(firestore, "products", ProductEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { productRepository.insertProduct(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "products", syncRelationshipMapper::productFromCloud,
+                    { productRepository.insertProduct(it) }, errors)
 
                 _syncStatus.value = "Pulling purchases..."
-                pullCollection(firestore, "purchases", PurchaseEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { purchaseRepository.insertPurchase(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "purchases", syncRelationshipMapper::purchaseFromCloud,
+                    { purchaseRepository.insertPurchase(it) }, errors)
 
                 _syncStatus.value = "Pulling purchase items..."
-                pullCollection(firestore, "purchase_items", PurchaseItemEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { purchaseRepository.insertPurchaseItem(it.copy(isSynced = true)) }, errors)
+                pullCollection(
+                    firestore,
+                    "purchase_items",
+                    syncRelationshipMapper::purchaseItemFromCloud,
+                    { purchaseRepository.insertPurchaseItem(it) },
+                    errors
+                )
 
                 _syncStatus.value = "Pulling sales..."
-                pullCollection(firestore, "sales", SaleEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { saleRepository.insertSale(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "sales", syncRelationshipMapper::saleFromCloud,
+                    { saleRepository.insertSale(it) }, errors)
 
                 _syncStatus.value = "Pulling sale items..."
-                pullCollection(firestore, "sale_items", SaleItemEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { saleRepository.insertSaleItem(it.copy(isSynced = true)) }, errors)
+                pullCollection(firestore, "sale_items", syncRelationshipMapper::saleItemFromCloud,
+                    { saleRepository.insertSaleItem(it) }, errors)
 
                 _syncStatus.value = "Pulling settings..."
-                pullCollection(firestore, "settings", SettingEntity::class.java,
-                    { item, firebaseId -> item.copy(firebaseId = firebaseId) },
-                    { settingRepository.insertSetting(it.copy(isSynced = true)) }, errors)
+                pullShopSettings(firestore, errors)
 
                 // ============ RESULT ============
                 if (errors.isEmpty()) {
+                    syncCheckpointStore.markSuccessfulSync(syncStartedAt)
                     _syncStatus.value = "Sync completed successfully!"
                 } else {
                     _syncStatus.value = "Sync done with ${errors.size} errors: ${errors.first()}"
                 }
-            } catch (e: Exception) {
-                Log.e("SyncDirect", "Fatal sync error", e)
-                _syncStatus.value = "Sync FAILED: ${e.localizedMessage}"
-            } finally {
-                _isSyncing.value = false
-            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("SyncDirect", "Fatal sync error", e)
+            _syncStatus.value = "Sync FAILED: ${e.localizedMessage}"
         }
     }
 
     private suspend fun processPendingDeletions(firestore: FirebaseFirestore) {
-        for (deletion in pendingDeletionDao.getAll()) {
-            firestore.collection(deletion.collection)
-                .document(deletion.firebaseId)
-                .delete()
+        for (deletions in pendingDeletionDao.getAll().chunked(MAX_FIRESTORE_BATCH_OPERATIONS)) {
+            val batch = firestore.batch()
+            for (deletion in deletions) {
+                batch.delete(
+                    firestore.collection(deletion.collection).document(deletion.firebaseId)
+                )
+            }
+            batch.commit().await()
+            for (deletion in deletions) {
+                pendingDeletionDao.delete(deletion)
+            }
+        }
+    }
+
+    private suspend fun pullShopSettings(
+        firestore: FirebaseFirestore,
+        errors: MutableList<String>
+    ) {
+        try {
+            val document = firestore.collection("settings")
+                .document(SETTINGS_DOCUMENT_ID)
+                .get()
                 .await()
-            pendingDeletionDao.delete(deletion)
+            val setting = document.toObject(SettingEntity::class.java) ?: return
+
+            database.withTransaction {
+                if (!pendingDeletionDao.exists("settings", SETTINGS_DOCUMENT_ID)) {
+                    settingRepository.insertSetting(
+                        setting.copy(firebaseId = SETTINGS_DOCUMENT_ID, isSynced = true)
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            val message = "Pull settings failed: ${e.localizedMessage}"
+            Log.e("SyncDirect", message, e)
+            errors.add(message)
         }
     }
 
@@ -261,23 +321,39 @@ class SettingsViewModel @Inject constructor(
         withFirebaseId: (T, String) -> T,
         persistAssignedId: suspend (T) -> Unit,
         markSynced: suspend (T) -> Unit,
-        errors: MutableList<String>
+        errors: MutableList<String>,
+        prepareForCloud: suspend (T) -> Any = { it }
     ) {
         Log.d("SyncDirect", "Pushing ${items.size} items to $collection")
-        for (item in items) {
+        for (itemBatch in items.chunked(MAX_FIRESTORE_BATCH_OPERATIONS)) {
             try {
-                val existingFirebaseId = getFirebaseId(item)?.takeIf(String::isNotBlank)
-                val documentId = existingFirebaseId ?: UUID.randomUUID().toString()
-                val itemWithFirebaseId = withFirebaseId(item, documentId)
+                val firestoreBatch = firestore.batch()
+                val preparedLocalItems = mutableListOf<T>()
 
-                if (existingFirebaseId == null) {
-                    persistAssignedId(itemWithFirebaseId)
+                for (item in itemBatch) {
+                    val existingFirebaseId = getFirebaseId(item)?.takeIf(String::isNotBlank)
+                    val documentId = existingFirebaseId ?: UUID.randomUUID().toString()
+                    val itemWithFirebaseId = withFirebaseId(item, documentId)
+
+                    if (existingFirebaseId == null) {
+                        persistAssignedId(itemWithFirebaseId)
+                    }
+
+                    val cloudItem = prepareForCloud(itemWithFirebaseId)
+                    firestoreBatch.set(
+                        firestore.collection(collection).document(documentId),
+                        cloudItem
+                    )
+                    preparedLocalItems.add(itemWithFirebaseId)
                 }
 
-                firestore.collection(collection).document(documentId).set(itemWithFirebaseId).await()
-                markSynced(itemWithFirebaseId)
+                firestoreBatch.commit().await()
+                for (preparedItem in preparedLocalItems) {
+                    markSynced(preparedItem)
+                }
             } catch (e: Exception) {
-                val msg = "Push $collection local ID ${getLocalId(item)}: ${e.localizedMessage}"
+                val msg = "Push $collection batch starting at local ID " +
+                    "${getLocalId(itemBatch.first())}: ${e.localizedMessage}"
                 Log.e("SyncDirect", msg, e)
                 errors.add(msg)
             }
@@ -287,21 +363,20 @@ class SettingsViewModel @Inject constructor(
     private suspend fun <T : Any> pullCollection(
         firestore: FirebaseFirestore,
         collection: String,
-        clazz: Class<T>,
-        withFirebaseId: (T, String) -> T,
+        mapFromCloud: suspend (DocumentSnapshot) -> T?,
         insert: suspend (T) -> Unit,
         errors: MutableList<String>
     ) {
         try {
-            val snapshot = firestore.collection(collection).get().await()
+            val snapshot = syncCheckpointStore.queryFor(firestore, collection).get().await()
             Log.d("SyncDirect", "Pulled ${snapshot.documents.size} docs from $collection")
             for (doc in snapshot.documents) {
                 try {
-                    val obj = doc.toObject(clazz)
+                    val obj = mapFromCloud(doc)
                     if (obj != null) {
                         database.withTransaction {
                             if (!pendingDeletionDao.exists(collection, doc.id)) {
-                                insert(withFirebaseId(obj, doc.id))
+                                insert(obj)
                             }
                         }
                     } else {
@@ -318,5 +393,10 @@ class SettingsViewModel @Inject constructor(
             Log.e("SyncDirect", msg, e)
             errors.add(msg)
         }
+    }
+
+    private companion object {
+        private const val SETTINGS_DOCUMENT_ID = "shop"
+        private const val MAX_FIRESTORE_BATCH_OPERATIONS = 400
     }
 }

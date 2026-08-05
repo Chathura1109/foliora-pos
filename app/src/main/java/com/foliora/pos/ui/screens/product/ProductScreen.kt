@@ -1,8 +1,11 @@
 package com.foliora.pos.ui.screens.product
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -69,17 +72,22 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -89,7 +97,13 @@ import com.foliora.pos.data.local.entity.CategoryEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.ui.components.CameraPreviewScreen
 import com.foliora.pos.ui.components.FolioraTopAppBar
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 
 /**
@@ -369,18 +383,7 @@ private fun ProductItemCard(
 ) {
     val isLowStock = product.stockQuantity <= product.lowStockLimit
 
-    val photoFile = remember(product.photoPath) {
-        if (!product.photoPath.isNullOrBlank()) File(product.photoPath) else null
-    }
-    val imageBitmap = remember(photoFile) {
-        if (photoFile != null && photoFile.exists()) {
-            try {
-                BitmapFactory.decodeFile(photoFile.absolutePath)?.asImageBitmap()
-            } catch (e: Exception) {
-                null
-            }
-        } else null
-    }
+    val imageBitmap = rememberSampledImageBitmap(product.photoPath, 52.dp)
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -558,6 +561,10 @@ private fun AddEditProductDialog(
     var photoPathState by remember { mutableStateOf(product?.photoPath) }
 
     var showCameraPreview by remember { mutableStateOf(false) }
+    var isImportingPhoto by remember { mutableStateOf(false) }
+    var categoryDropdownExpanded by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     // Launcher for requesting CAMERA permission before displaying camera preview
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
@@ -567,8 +574,25 @@ private fun AddEditProductDialog(
         showCameraPreview = true
     }
 
-    var categoryDropdownExpanded by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val photoFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { selectedPhotoUri ->
+        if (selectedPhotoUri != null) {
+            isImportingPhoto = true
+            coroutineScope.launch {
+                try {
+                    photoPathState = withContext(Dispatchers.IO) {
+                        copySelectedProductPhoto(context, selectedPhotoUri)
+                    }
+                    errorMessage = null
+                } catch (exception: Exception) {
+                    errorMessage = exception.localizedMessage ?: "Unable to import the selected photo."
+                } finally {
+                    isImportingPhoto = false
+                }
+            }
+        }
+    }
 
     val commonUnits = listOf("pcs", "kg", "g", "liters", "ml", "bags", "boxes", "packs", "m")
 
@@ -630,18 +654,7 @@ private fun AddEditProductDialog(
                             .padding(vertical = 4.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        val photoFile = remember(photoPathState) {
-                            if (!photoPathState.isNullOrBlank()) File(photoPathState!!) else null
-                        }
-                        val imageBitmap = remember(photoFile) {
-                            if (photoFile != null && photoFile.exists()) {
-                                try {
-                                    BitmapFactory.decodeFile(photoFile.absolutePath)?.asImageBitmap()
-                                } catch (e: Exception) {
-                                    null
-                                }
-                            } else null
-                        }
+                        val imageBitmap = rememberSampledImageBitmap(photoPathState, 110.dp)
 
                         Box(
                             modifier = Modifier
@@ -700,6 +713,21 @@ private fun AddEditProductDialog(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(if (photoPathState.isNullOrBlank()) "Take Photo" else "Retake Photo")
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedButton(
+                            onClick = { photoFileLauncher.launch("image/*") },
+                            enabled = !isImportingPhoto
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Image,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(if (isImportingPhoto) "Importing..." else "Choose Photo")
                         }
                     }
 
@@ -910,5 +938,150 @@ private fun AddEditProductDialog(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun rememberSampledImageBitmap(
+    photoPath: String?,
+    targetSize: Dp
+): ImageBitmap? {
+    val density = LocalDensity.current
+    val targetSizePx = with(density) { targetSize.roundToPx() }.coerceAtLeast(1)
+    val imageBitmap by produceState<ImageBitmap?>(
+        initialValue = null,
+        key1 = photoPath,
+        key2 = targetSizePx
+    ) {
+        value = withContext(Dispatchers.IO) {
+            decodeSampledImageBitmap(photoPath, targetSizePx)
+        }
+    }
+    return imageBitmap
+}
+
+private fun decodeSampledImageBitmap(
+    photoPath: String?,
+    targetSizePx: Int
+): ImageBitmap? {
+    if (photoPath.isNullOrBlank()) return null
+
+    if (photoPath.startsWith("https://") || photoPath.startsWith("http://")) {
+        return decodeRemoteImageBitmap(photoPath, targetSizePx)
+    }
+
+    val photoFile = File(photoPath)
+    if (!photoFile.isFile) return null
+
+    return try {
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeFile(photoFile.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        var sampleSize = 1
+        while (
+            bounds.outWidth / (sampleSize * 2) >= targetSizePx &&
+            bounds.outHeight / (sampleSize * 2) >= targetSizePx
+        ) {
+            sampleSize *= 2
+        }
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+        }
+        BitmapFactory.decodeFile(photoFile.absolutePath, decodeOptions)?.asImageBitmap()
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun decodeRemoteImageBitmap(
+    photoUrl: String,
+    targetSizePx: Int
+): ImageBitmap? {
+    return try {
+        val connection = URL(photoUrl).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 15_000
+            connection.instanceFollowRedirects = true
+
+            val declaredLength = connection.contentLengthLong
+            if (declaredLength > MAX_REMOTE_IMAGE_BYTES) return null
+
+            val output = ByteArrayOutputStream()
+            connection.inputStream.use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var totalBytes = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    totalBytes += count
+                    if (totalBytes > MAX_REMOTE_IMAGE_BYTES) return null
+                    output.write(buffer, 0, count)
+                }
+            }
+
+            val imageBytes = output.toByteArray()
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+            var sampleSize = 1
+            while (
+                bounds.outWidth / (sampleSize * 2) >= targetSizePx &&
+                bounds.outHeight / (sampleSize * 2) >= targetSizePx
+            ) {
+                sampleSize *= 2
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, decodeOptions)?.asImageBitmap()
+        } finally {
+            connection.disconnect()
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private const val MAX_REMOTE_IMAGE_BYTES = 10 * 1024 * 1024
+
+private fun copySelectedProductPhoto(context: Context, sourceUri: Uri): String {
+    val mimeType = context.contentResolver.getType(sourceUri)
+    require(mimeType?.startsWith("image/") == true) { "Please select a valid image file." }
+
+    val extension = MimeTypeMap.getSingleton()
+        .getExtensionFromMimeType(mimeType)
+        ?.takeIf(String::isNotBlank)
+        ?: "jpg"
+    val photoDirectory = File(context.filesDir, "product_photos").apply { mkdirs() }
+    val destination = File(photoDirectory, "IMPORT_${System.currentTimeMillis()}_product.$extension")
+
+    try {
+        val inputStream = requireNotNull(context.contentResolver.openInputStream(sourceUri)) {
+            "Unable to open the selected photo."
+        }
+        inputStream.use { input ->
+            destination.outputStream().use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var totalBytes = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    totalBytes += count
+                    require(totalBytes <= MAX_REMOTE_IMAGE_BYTES) {
+                        "The selected photo must be smaller than 10 MB."
+                    }
+                    output.write(buffer, 0, count)
+                }
+            }
+        }
+        return destination.absolutePath
+    } catch (exception: Exception) {
+        destination.delete()
+        throw exception
     }
 }

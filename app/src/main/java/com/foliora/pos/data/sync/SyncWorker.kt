@@ -10,6 +10,7 @@ import com.foliora.pos.data.local.FolioraDatabase
 import com.foliora.pos.data.local.dao.PendingDeletionDao
 import com.foliora.pos.data.local.entity.*
 import com.foliora.pos.data.repository.*
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -30,12 +31,20 @@ class SyncWorker @AssistedInject constructor(
     private val purchaseRepository: PurchaseRepository,
     private val settingRepository: SettingRepository,
     private val database: FolioraDatabase,
-    private val pendingDeletionDao: PendingDeletionDao
+    private val pendingDeletionDao: PendingDeletionDao,
+    private val syncCheckpointStore: SyncCheckpointStore,
+    private val syncExecutionGuard: SyncExecutionGuard,
+    private val syncRelationshipMapper: SyncRelationshipMapper
 ) : CoroutineWorker(context, params) {
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = syncExecutionGuard.runExclusive {
+        performSync()
+    }
+
+    private suspend fun performSync(): Result {
         Log.d(TAG, "Starting WorkManager sync execution...")
         val firestore = FirebaseFirestore.getInstance()
+        val syncStartedAt = System.currentTimeMillis()
 
         try {
             processPendingDeletions(firestore)
@@ -48,15 +57,15 @@ class SyncWorker @AssistedInject constructor(
 
         return try {
             // Push local changes to cloud first
-            pushSales(firestore)
-            pushSaleItems(firestore)
-            pushProducts(firestore)
-            pushCustomers(firestore)
             pushUsers(firestore)
             pushCategories(firestore)
             pushSuppliers(firestore)
+            pushCustomers(firestore)
+            pushProducts(firestore)
             pushPurchases(firestore)
             pushPurchaseItems(firestore)
+            pushSales(firestore)
+            pushSaleItems(firestore)
             pushSettings(firestore)
 
             // Pull cloud changes to local DB
@@ -71,6 +80,7 @@ class SyncWorker @AssistedInject constructor(
             pullSaleItems(firestore)
             pullSettings(firestore)
 
+            syncCheckpointStore.markSuccessfulSync(syncStartedAt)
             Log.d(TAG, "WorkManager sync completed successfully.")
             Result.success()
         } catch (e: CancellationException) {
@@ -82,12 +92,17 @@ class SyncWorker @AssistedInject constructor(
     }
 
     private suspend fun processPendingDeletions(firestore: FirebaseFirestore) {
-        for (deletion in pendingDeletionDao.getAll()) {
-            firestore.collection(deletion.collection)
-                .document(deletion.firebaseId)
-                .delete()
-                .await()
-            pendingDeletionDao.delete(deletion)
+        for (deletions in pendingDeletionDao.getAll().chunked(MAX_FIRESTORE_BATCH_OPERATIONS)) {
+            val batch = firestore.batch()
+            for (deletion in deletions) {
+                batch.delete(
+                    firestore.collection(deletion.collection).document(deletion.firebaseId)
+                )
+            }
+            batch.commit().await()
+            for (deletion in deletions) {
+                pendingDeletionDao.delete(deletion)
+            }
         }
     }
 
@@ -104,7 +119,8 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = saleRepository::updateSale,
-            markSynced = { saleRepository.updateSale(it.copy(isSynced = true)) }
+            markSynced = { saleRepository.updateSale(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::saleToCloud
         )
     }
 
@@ -117,7 +133,8 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = saleRepository::updateSaleItem,
-            markSynced = { saleRepository.updateSaleItem(it.copy(isSynced = true)) }
+            markSynced = { saleRepository.updateSaleItem(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::saleItemToCloud
         )
     }
 
@@ -130,7 +147,12 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = productRepository::updateProduct,
-            markSynced = { productRepository.updateProduct(it.copy(isSynced = true)) }
+            markSynced = { productRepository.updateProduct(it.copy(isSynced = true)) },
+            prepareForCloud = { product ->
+                syncRelationshipMapper.productToCloud(
+                    productRepository.prepareProductForCloud(product)
+                )
+            }
         )
     }
 
@@ -143,7 +165,8 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = customerRepository::updateCustomer,
-            markSynced = { customerRepository.updateCustomer(it.copy(isSynced = true)) }
+            markSynced = { customerRepository.updateCustomer(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::customerToCloud
         )
     }
 
@@ -159,7 +182,8 @@ class SyncWorker @AssistedInject constructor(
             },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = userRepository::updateUser,
-            markSynced = { userRepository.updateUser(it.copy(isSynced = true)) }
+            markSynced = { userRepository.updateUser(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::userToCloud
         )
     }
 
@@ -172,7 +196,8 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = categoryRepository::updateCategory,
-            markSynced = { categoryRepository.updateCategory(it.copy(isSynced = true)) }
+            markSynced = { categoryRepository.updateCategory(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::categoryToCloud
         )
     }
 
@@ -185,7 +210,8 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = supplierRepository::updateSupplier,
-            markSynced = { supplierRepository.updateSupplier(it.copy(isSynced = true)) }
+            markSynced = { supplierRepository.updateSupplier(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::supplierToCloud
         )
     }
 
@@ -198,7 +224,8 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = purchaseRepository::updatePurchase,
-            markSynced = { purchaseRepository.updatePurchase(it.copy(isSynced = true)) }
+            markSynced = { purchaseRepository.updatePurchase(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::purchaseToCloud
         )
     }
 
@@ -211,7 +238,8 @@ class SyncWorker @AssistedInject constructor(
             getFirebaseId = { it.firebaseId },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = purchaseRepository::updatePurchaseItem,
-            markSynced = { purchaseRepository.updatePurchaseItem(it.copy(isSynced = true)) }
+            markSynced = { purchaseRepository.updatePurchaseItem(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::purchaseItemToCloud
         )
     }
 
@@ -221,7 +249,7 @@ class SyncWorker @AssistedInject constructor(
             collection = COLLECTION_SETTINGS,
             items = settingRepository.getUnsyncedSettings(),
             getLocalId = { it.id },
-            getFirebaseId = { it.firebaseId },
+            getFirebaseId = { SETTINGS_DOCUMENT_ID },
             withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
             persistAssignedId = settingRepository::updateSetting,
             markSynced = { settingRepository.updateSetting(it.copy(isSynced = true)) }
@@ -236,24 +264,40 @@ class SyncWorker @AssistedInject constructor(
         getFirebaseId: (T) -> String?,
         withFirebaseId: (T, String) -> T,
         persistAssignedId: suspend (T) -> Unit,
-        markSynced: suspend (T) -> Unit
+        markSynced: suspend (T) -> Unit,
+        prepareForCloud: suspend (T) -> Any = { it }
     ) {
-        for (item in items) {
+        for (itemBatch in items.chunked(MAX_FIRESTORE_BATCH_OPERATIONS)) {
             try {
-                val existingFirebaseId = getFirebaseId(item)?.takeIf(String::isNotBlank)
-                val documentId = existingFirebaseId ?: UUID.randomUUID().toString()
-                val itemWithFirebaseId = withFirebaseId(item, documentId)
+                val firestoreBatch = firestore.batch()
+                val preparedLocalItems = mutableListOf<T>()
 
-                if (existingFirebaseId == null) {
-                    persistAssignedId(itemWithFirebaseId)
+                for (item in itemBatch) {
+                    val existingFirebaseId = getFirebaseId(item)?.takeIf(String::isNotBlank)
+                    val documentId = existingFirebaseId ?: UUID.randomUUID().toString()
+                    val itemWithFirebaseId = withFirebaseId(item, documentId)
+
+                    if (existingFirebaseId == null) {
+                        persistAssignedId(itemWithFirebaseId)
+                    }
+
+                    val cloudItem = prepareForCloud(itemWithFirebaseId)
+                    firestoreBatch.set(
+                        firestore.collection(collection).document(documentId),
+                        cloudItem
+                    )
+                    preparedLocalItems.add(itemWithFirebaseId)
                 }
 
-                firestore.collection(collection).document(documentId).set(itemWithFirebaseId).await()
-                markSynced(itemWithFirebaseId)
+                firestoreBatch.commit().await()
+                for (preparedItem in preparedLocalItems) {
+                    markSynced(preparedItem)
+                }
             } catch (e: Exception) {
                 Log.e(
                     TAG,
-                    "Error syncing $collection local ID ${getLocalId(item)}: ${e.localizedMessage}",
+                    "Error syncing $collection batch starting at local ID " +
+                        "${getLocalId(itemBatch.first())}: ${e.localizedMessage}",
                     e
                 )
                 throw e
@@ -266,43 +310,99 @@ class SyncWorker @AssistedInject constructor(
     // ==========================================
 
     private suspend fun pullSales(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SALES).get().await().documents) { doc.toObject(SaleEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALES, doc.id) { saleRepository.insertSale(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sales: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_SALES, syncRelationshipMapper::saleFromCloud) {
+            saleRepository.insertSale(it)
+        }
     }
 
     private suspend fun pullSaleItems(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SALE_ITEMS).get().await().documents) { doc.toObject(SaleItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SALE_ITEMS, doc.id) { saleRepository.insertSaleItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling sale items: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_SALE_ITEMS, syncRelationshipMapper::saleItemFromCloud) {
+            saleRepository.insertSaleItem(it)
+        }
     }
 
     private suspend fun pullProducts(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PRODUCTS).get().await().documents) { doc.toObject(ProductEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PRODUCTS, doc.id) { productRepository.insertProduct(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling products: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_PRODUCTS, syncRelationshipMapper::productFromCloud) {
+            productRepository.insertProduct(it)
+        }
     }
 
     private suspend fun pullCustomers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_CUSTOMERS).get().await().documents) { doc.toObject(CustomerEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CUSTOMERS, doc.id) { customerRepository.insertCustomer(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling customers: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_CUSTOMERS, syncRelationshipMapper::customerFromCloud) {
+            customerRepository.insertCustomer(it)
+        }
     }
 
     private suspend fun pullUsers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_USERS).get().await().documents) { doc.toObject(UserEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_USERS, doc.id) { userRepository.insertUser(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling users: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_USERS, syncRelationshipMapper::userFromCloud) {
+            userRepository.insertUser(it)
+        }
     }
 
     private suspend fun pullCategories(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_CATEGORIES).get().await().documents) { doc.toObject(CategoryEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_CATEGORIES, doc.id) { categoryRepository.insertCategory(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling categories: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_CATEGORIES, syncRelationshipMapper::categoryFromCloud) {
+            categoryRepository.insertCategory(it)
+        }
     }
 
     private suspend fun pullSuppliers(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SUPPLIERS).get().await().documents) { doc.toObject(SupplierEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_SUPPLIERS, doc.id) { supplierRepository.insertSupplier(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling suppliers: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_SUPPLIERS, syncRelationshipMapper::supplierFromCloud) {
+            supplierRepository.insertSupplier(it)
+        }
     }
 
     private suspend fun pullPurchases(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PURCHASES).get().await().documents) { doc.toObject(PurchaseEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASES, doc.id) { purchaseRepository.insertPurchase(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchases: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(firestore, COLLECTION_PURCHASES, syncRelationshipMapper::purchaseFromCloud) {
+            purchaseRepository.insertPurchase(it)
+        }
     }
 
     private suspend fun pullPurchaseItems(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_PURCHASE_ITEMS).get().await().documents) { doc.toObject(PurchaseItemEntity::class.java)?.let { item -> insertPulledIfNotPending(COLLECTION_PURCHASE_ITEMS, doc.id) { purchaseRepository.insertPurchaseItem(item.copy(firebaseId = doc.id, isSynced = true)) } } } } catch (e: Exception) { Log.e(TAG, "Error pulling purchase items: ${e.localizedMessage}"); throw e }
+        pullMappedCollection(
+            firestore,
+            COLLECTION_PURCHASE_ITEMS,
+            syncRelationshipMapper::purchaseItemFromCloud
+        ) {
+            purchaseRepository.insertPurchaseItem(it)
+        }
+    }
+
+    private suspend fun <T : Any> pullMappedCollection(
+        firestore: FirebaseFirestore,
+        collection: String,
+        mapFromCloud: suspend (DocumentSnapshot) -> T?,
+        insert: suspend (T) -> Unit
+    ) {
+        try {
+            val documents = syncCheckpointStore.queryFor(firestore, collection).get().await().documents
+            for (document in documents) {
+                mapFromCloud(document)?.let { item ->
+                    insertPulledIfNotPending(collection, document.id) { insert(item) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error pulling $collection: ${e.localizedMessage}", e)
+            throw e
+        }
     }
 
     private suspend fun pullSettings(firestore: FirebaseFirestore) {
-        try { for (doc in firestore.collection(COLLECTION_SETTINGS).get().await().documents) { doc.toObject(SettingEntity::class.java)?.let { settingRepository.insertSetting(it.copy(firebaseId = doc.id, isSynced = true)) } } } catch (e: Exception) { Log.e(TAG, "Error pulling settings: ${e.localizedMessage}"); throw e }
+        try {
+            val document = firestore.collection(COLLECTION_SETTINGS)
+                .document(SETTINGS_DOCUMENT_ID)
+                .get()
+                .await()
+            document.toObject(SettingEntity::class.java)?.let { setting ->
+                insertPulledIfNotPending(COLLECTION_SETTINGS, SETTINGS_DOCUMENT_ID) {
+                    settingRepository.insertSetting(
+                        setting.copy(firebaseId = SETTINGS_DOCUMENT_ID, isSynced = true)
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error pulling settings: ${e.localizedMessage}")
+            throw e
+        }
     }
 
     private suspend fun insertPulledIfNotPending(
@@ -329,5 +429,7 @@ class SyncWorker @AssistedInject constructor(
         private const val COLLECTION_PURCHASES = "purchases"
         private const val COLLECTION_PURCHASE_ITEMS = "purchase_items"
         private const val COLLECTION_SETTINGS = "settings"
+        private const val SETTINGS_DOCUMENT_ID = "shop"
+        private const val MAX_FIRESTORE_BATCH_OPERATIONS = 400
     }
 }
