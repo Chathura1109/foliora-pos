@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -53,6 +54,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -74,9 +76,12 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.foliora.pos.data.local.entity.CustomerEntity
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.ui.components.ErrorDialog
 import com.foliora.pos.ui.components.FolioraTopAppBar
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
@@ -95,6 +100,7 @@ fun NewSaleScreen(
     viewModel: NewSaleViewModel = hiltViewModel()
 ) {
     val products by viewModel.products.collectAsStateWithLifecycle()
+    val availableBatches by viewModel.availableBatches.collectAsStateWithLifecycle()
     val customers by viewModel.customers.collectAsStateWithLifecycle()
     val cartItems by viewModel.cartItems.collectAsStateWithLifecycle()
     val selectedCustomer by viewModel.selectedCustomer.collectAsStateWithLifecycle()
@@ -102,9 +108,11 @@ fun NewSaleScreen(
     val saleStatus by viewModel.saleStatus.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val currentUserRole by viewModel.currentUserRole.collectAsStateWithLifecycle()
 
     NewSaleScreenContent(
         products = products,
+        availableBatches = availableBatches,
         customers = customers,
         cartItems = cartItems,
         selectedCustomer = selectedCustomer,
@@ -112,10 +120,11 @@ fun NewSaleScreen(
         saleStatus = saleStatus,
         isProcessing = isProcessing,
         errorMessage = errorMessage,
+        showCostPrice = currentUserRole == "OWNER",
         onBackClick = onBackClick,
-        onAddToCart = { product, qty -> viewModel.addToCart(product, qty) },
-        onRemoveFromCart = { product -> viewModel.removeFromCart(product) },
-        onUpdateQuantity = { product, qty -> viewModel.updateQuantity(product, qty) },
+        onAddToCart = { product, batch, qty -> viewModel.addToCart(product, batch, qty) },
+        onRemoveFromCart = viewModel::removeFromCart,
+        onUpdateQuantity = viewModel::updateQuantity,
         onSelectCustomer = { customer -> viewModel.selectCustomer(customer) },
         onSelectPaymentMethod = { method -> viewModel.setPaymentMethod(method) },
         onSelectSaleStatus = { status -> viewModel.setSaleStatus(status) },
@@ -132,6 +141,7 @@ fun NewSaleScreen(
 @Composable
 fun NewSaleScreenContent(
     products: List<ProductEntity>,
+    availableBatches: List<InventoryBatchEntity>,
     customers: List<CustomerEntity>,
     cartItems: List<CartItem>,
     selectedCustomer: CustomerEntity?,
@@ -139,10 +149,11 @@ fun NewSaleScreenContent(
     saleStatus: String,
     isProcessing: Boolean,
     errorMessage: String?,
+    showCostPrice: Boolean,
     onBackClick: () -> Unit,
-    onAddToCart: (ProductEntity, Double) -> Unit,
-    onRemoveFromCart: (ProductEntity) -> Unit,
-    onUpdateQuantity: (ProductEntity, Double) -> Unit,
+    onAddToCart: (ProductEntity, InventoryBatchEntity, Double) -> Unit,
+    onRemoveFromCart: (CartItem) -> Unit,
+    onUpdateQuantity: (CartItem, Double) -> Unit,
     onSelectCustomer: (CustomerEntity?) -> Unit,
     onSelectPaymentMethod: (String) -> Unit,
     onSelectSaleStatus: (String) -> Unit,
@@ -151,7 +162,7 @@ fun NewSaleScreenContent(
     modifier: Modifier = Modifier
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    var productForQuantityDialog by remember { mutableStateOf<ProductEntity?>(null) }
+    var productForBatchDialog by remember { mutableStateOf<ProductEntity?>(null) }
 
     // Filter active products matching search query
     val filteredProducts = remember(products, searchQuery) {
@@ -247,7 +258,7 @@ fun NewSaleScreenContent(
                         ) { product ->
                             POSProductCard(
                                 product = product,
-                                onClick = { productForQuantityDialog = product }
+                                onClick = { productForBatchDialog = product }
                             )
                         }
                     }
@@ -421,12 +432,13 @@ fun NewSaleScreenContent(
                     ) {
                         items(
                             items = cartItems,
-                            key = { it.product.id }
+                            key = { it.batch.id }
                         ) { item ->
                             CartItemRow(
                                 cartItem = item,
-                                onUpdateQuantity = { qty -> onUpdateQuantity(item.product, qty) },
-                                onRemove = { onRemoveFromCart(item.product) }
+                                showCostPrice = showCostPrice,
+                                onUpdateQuantity = { qty -> onUpdateQuantity(item, qty) },
+                                onRemove = { onRemoveFromCart(item) }
                             )
                         }
                     }
@@ -497,14 +509,17 @@ fun NewSaleScreenContent(
         }
     }
 
-    // Product Quantity Input Dialog
-    if (productForQuantityDialog != null) {
-        AddToCartQuantityDialog(
-            product = productForQuantityDialog!!,
-            onDismiss = { productForQuantityDialog = null },
-            onConfirm = { quantity ->
-                onAddToCart(productForQuantityDialog!!, quantity)
-                productForQuantityDialog = null
+    // Manual stock-batch and quantity selection dialog.
+    if (productForBatchDialog != null) {
+        val product = productForBatchDialog!!
+        AddToCartBatchDialog(
+            product = product,
+            batches = availableBatches.filter { it.productId == product.id },
+            showCostPrice = showCostPrice,
+            onDismiss = { productForBatchDialog = null },
+            onConfirm = { batch, quantity ->
+                onAddToCart(product, batch, quantity)
+                productForBatchDialog = null
             }
         )
     }
@@ -593,6 +608,7 @@ private fun POSProductCard(
 @Composable
 private fun CartItemRow(
     cartItem: CartItem,
+    showCostPrice: Boolean,
     onUpdateQuantity: (Double) -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier
@@ -600,8 +616,8 @@ private fun CartItemRow(
     val formattedSubtotal = remember(cartItem.subtotal) {
         String.format(Locale.getDefault(), "Rs.%.2f", cartItem.subtotal)
     }
-    val formattedUnitPrice = remember(cartItem.product.sellingPrice) {
-        String.format(Locale.getDefault(), "Rs.%.2f", cartItem.product.sellingPrice)
+    val formattedUnitPrice = remember(cartItem.batch.sellingPrice) {
+        String.format(Locale.getDefault(), "Rs.%.2f", cartItem.batch.sellingPrice)
     }
 
     Card(
@@ -631,6 +647,19 @@ private fun CartItemRow(
                 Text(
                     text = "$formattedUnitPrice / ${cartItem.product.unit}",
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+                val batchDate = remember(cartItem.batch.receivedAt) {
+                    SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+                        .format(Date(cartItem.batch.receivedAt))
+                }
+                Text(
+                    text = if (showCostPrice) {
+                        "Batch #${cartItem.batch.id} • Cost Rs.${String.format(Locale.getDefault(), "%.2f", cartItem.batch.unitCost)} • $batchDate"
+                    } else {
+                        "Batch #${cartItem.batch.id} • $batchDate"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline
                 )
             }
@@ -782,13 +811,18 @@ private fun CustomerDropdownMenu(
  * Dialog prompting user to enter or adjust quantity when adding a product to cart.
  */
 @Composable
-private fun AddToCartQuantityDialog(
+private fun AddToCartBatchDialog(
     product: ProductEntity,
+    batches: List<InventoryBatchEntity>,
+    showCostPrice: Boolean,
     onDismiss: () -> Unit,
-    onConfirm: (Double) -> Unit
+    onConfirm: (InventoryBatchEntity, Double) -> Unit
 ) {
     var quantityText by remember { mutableStateOf("1") }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var selectedBatchId by remember(product.id, batches) {
+        mutableStateOf(batches.firstOrNull()?.id)
+    }
 
     val formattedPrice = remember(product.sellingPrice) {
         String.format(Locale.getDefault(), "Rs.%.2f", product.sellingPrice)
@@ -797,7 +831,7 @@ private fun AddToCartQuantityDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(text = "Add to Cart")
+            Text(text = "Select Stock Batch")
         },
         text = {
             Column {
@@ -807,11 +841,70 @@ private fun AddToCartQuantityDialog(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Price: $formattedPrice / ${product.unit}  |  Available Stock: ${product.stockQuantity} ${product.unit}",
+                    text = "Latest price: $formattedPrice / ${product.unit}  |  Available Stock: ${product.stockQuantity} ${product.unit}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
                 )
+
+                if (batches.isEmpty()) {
+                    Text(
+                        text = "No synced stock batch is available. Sync inventory before checkout.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 220.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(items = batches, key = { it.id }) { batch ->
+                            val batchDate = remember(batch.receivedAt) {
+                                SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+                                    .format(Date(batch.receivedAt))
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        selectedBatchId = batch.id
+                                        errorText = null
+                                    }
+                                    .padding(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = selectedBatchId == batch.id,
+                                    onClick = {
+                                        selectedBatchId = batch.id
+                                        errorText = null
+                                    }
+                                )
+                                Column {
+                                    Text(
+                                        text = "Batch #${batch.id} — ${batch.remainingQuantity} ${product.unit}",
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = if (showCostPrice) {
+                                            "Cost Rs.${String.format(Locale.getDefault(), "%.2f", batch.unitCost)} • " +
+                                                "Sell Rs.${String.format(Locale.getDefault(), "%.2f", batch.sellingPrice)} • $batchDate"
+                                        } else {
+                                            "Sell Rs.${String.format(Locale.getDefault(), "%.2f", batch.sellingPrice)} • $batchDate"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -866,12 +959,18 @@ private fun AddToCartQuantityDialog(
             Button(
                 onClick = {
                     val parsed = quantityText.toDoubleOrNull()
-                    if (parsed == null || parsed <= 0.0) {
+                    val selectedBatch = batches.firstOrNull { it.id == selectedBatchId }
+                    if (selectedBatch == null) {
+                        errorText = "Select a stock batch"
+                    } else if (parsed == null || !parsed.isFinite() || parsed <= 0.0) {
                         errorText = "Enter a valid quantity greater than 0"
+                    } else if (parsed > selectedBatch.remainingQuantity) {
+                        errorText = "Only ${selectedBatch.remainingQuantity} ${product.unit} remains in this batch"
                     } else {
-                        onConfirm(parsed)
+                        onConfirm(selectedBatch, parsed)
                     }
-                }
+                },
+                enabled = batches.isNotEmpty()
             ) {
                 Text(text = "Add to Cart")
             }

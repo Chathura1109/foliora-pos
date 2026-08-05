@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
 
 /**
  * Room entity representing individual line items within a purchase order.
@@ -27,7 +28,8 @@ import androidx.room.PrimaryKey
     ],
     indices = [
         Index(value = ["purchaseId"]),
-        Index(value = ["productId"])
+        Index(value = ["productId"]),
+        Index(value = ["batchId"])
     ]
 )
 data class PurchaseItemEntity(
@@ -35,8 +37,11 @@ data class PurchaseItemEntity(
     val id: Int = 0,
     val purchaseId: Int = 0,
     val productId: Int = 0,
+    val batchId: Int? = null,
     val quantity: Double = 0.0,
     val buyingPrice: Double = 0.0,
+    @ColumnInfo(defaultValue = "0")
+    val sellingPrice: Double = 0.0,
     val subtotal: Double = 0.0, // Calculated as quantity * buyingPrice
     
     // Sync tracking fields required across all Room entities

@@ -29,6 +29,8 @@ class SyncWorker @AssistedInject constructor(
     private val categoryRepository: CategoryRepository,
     private val supplierRepository: SupplierRepository,
     private val purchaseRepository: PurchaseRepository,
+    private val inventoryBatchRepository: InventoryBatchRepository,
+    private val stockAdjustmentRepository: StockAdjustmentRepository,
     private val settingRepository: SettingRepository,
     private val database: FolioraDatabase,
     private val pendingDeletionDao: PendingDeletionDao,
@@ -63,6 +65,8 @@ class SyncWorker @AssistedInject constructor(
             pushCustomers(firestore)
             pushProducts(firestore)
             pushPurchases(firestore)
+            pushInventoryBatches(firestore)
+            pushStockAdjustments(firestore)
             pushPurchaseItems(firestore)
             pushSales(firestore)
             pushSaleItems(firestore)
@@ -75,6 +79,8 @@ class SyncWorker @AssistedInject constructor(
             pullProducts(firestore)
             pullCustomers(firestore)
             pullPurchases(firestore)
+            pullInventoryBatches(firestore)
+            pullStockAdjustments(firestore)
             pullPurchaseItems(firestore)
             pullSales(firestore)
             pullSaleItems(firestore)
@@ -243,6 +249,34 @@ class SyncWorker @AssistedInject constructor(
         )
     }
 
+    private suspend fun pushInventoryBatches(firestore: FirebaseFirestore) {
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_INVENTORY_BATCHES,
+            items = inventoryBatchRepository.getUnsyncedBatches(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = inventoryBatchRepository::updateBatch,
+            markSynced = { inventoryBatchRepository.updateBatch(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::inventoryBatchToCloud
+        )
+    }
+
+    private suspend fun pushStockAdjustments(firestore: FirebaseFirestore) {
+        pushCollection(
+            firestore = firestore,
+            collection = COLLECTION_STOCK_ADJUSTMENTS,
+            items = stockAdjustmentRepository.getUnsyncedAdjustments(),
+            getLocalId = { it.id },
+            getFirebaseId = { it.firebaseId },
+            withFirebaseId = { item, firebaseId -> item.copy(firebaseId = firebaseId) },
+            persistAssignedId = stockAdjustmentRepository::insertAdjustment,
+            markSynced = { stockAdjustmentRepository.insertAdjustment(it.copy(isSynced = true)) },
+            prepareForCloud = syncRelationshipMapper::stockAdjustmentToCloud
+        )
+    }
+
     private suspend fun pushSettings(firestore: FirebaseFirestore) {
         pushCollection(
             firestore = firestore,
@@ -367,6 +401,26 @@ class SyncWorker @AssistedInject constructor(
         }
     }
 
+    private suspend fun pullInventoryBatches(firestore: FirebaseFirestore) {
+        pullMappedCollection(
+            firestore,
+            COLLECTION_INVENTORY_BATCHES,
+            syncRelationshipMapper::inventoryBatchFromCloud
+        ) {
+            inventoryBatchRepository.insertBatch(it)
+        }
+    }
+
+    private suspend fun pullStockAdjustments(firestore: FirebaseFirestore) {
+        pullMappedCollection(
+            firestore,
+            COLLECTION_STOCK_ADJUSTMENTS,
+            syncRelationshipMapper::stockAdjustmentFromCloud
+        ) {
+            stockAdjustmentRepository.insertAdjustment(it)
+        }
+    }
+
     private suspend fun <T : Any> pullMappedCollection(
         firestore: FirebaseFirestore,
         collection: String,
@@ -428,6 +482,8 @@ class SyncWorker @AssistedInject constructor(
         private const val COLLECTION_SUPPLIERS = "suppliers"
         private const val COLLECTION_PURCHASES = "purchases"
         private const val COLLECTION_PURCHASE_ITEMS = "purchase_items"
+        private const val COLLECTION_INVENTORY_BATCHES = "inventory_batches"
+        private const val COLLECTION_STOCK_ADJUSTMENTS = "stock_adjustments"
         private const val COLLECTION_SETTINGS = "settings"
         private const val SETTINGS_DOCUMENT_ID = "shop"
         private const val MAX_FIRESTORE_BATCH_OPERATIONS = 400

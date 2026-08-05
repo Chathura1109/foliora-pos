@@ -1,8 +1,13 @@
 package com.foliora.pos.data.repository
 
 import android.database.sqlite.SQLiteConstraintException
+import androidx.room.withTransaction
+import com.foliora.pos.data.local.FolioraDatabase
+import com.foliora.pos.data.local.dao.InventoryBatchDao
 import com.foliora.pos.data.local.dao.ProductDao
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
+import com.foliora.pos.data.local.entity.priceToCents
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,7 +28,9 @@ import javax.inject.Inject
  * @property productDao Data access object for product inventory operations.
  */
 class ProductRepository @Inject constructor(
-    private val productDao: ProductDao
+    private val database: FolioraDatabase,
+    private val productDao: ProductDao,
+    private val inventoryBatchDao: InventoryBatchDao
 ) {
 
     /**
@@ -33,11 +40,57 @@ class ProductRepository @Inject constructor(
         return productDao.insertProduct(product.copy(updatedAt = System.currentTimeMillis()))
     }
 
+    /** Creates a local product and its opening batch as one atomic Room operation. */
+    suspend fun createProductWithOpeningBatch(product: ProductEntity): Long =
+        database.withTransaction {
+            require(product.stockQuantity.isFinite() && product.stockQuantity >= 0) {
+                "Initial stock quantity is invalid"
+            }
+            val now = System.currentTimeMillis()
+            val productId = productDao.insertProduct(
+                product.copy(isSynced = false, updatedAt = now)
+            )
+            if (product.stockQuantity > 0) {
+                inventoryBatchDao.insertBatch(
+                    InventoryBatchEntity(
+                        productId = productId.toInt(),
+                        originalQuantity = product.stockQuantity,
+                        remainingQuantity = product.stockQuantity,
+                        unitCost = product.buyingPrice,
+                        sellingPrice = product.sellingPrice,
+                        unitCostCents = priceToCents(product.buyingPrice),
+                        sellingPriceCents = priceToCents(product.sellingPrice),
+                        receivedAt = now,
+                        isSynced = false,
+                        createdAt = now,
+                        updatedAt = now
+                    )
+                )
+            }
+            productId
+        }
+
     /**
      * Updates an existing product entity with an updated timestamp.
      */
     suspend fun updateProduct(product: ProductEntity) {
         productDao.updateProduct(product.copy(updatedAt = System.currentTimeMillis()))
+    }
+
+    /** Updates descriptive product fields while keeping batch-controlled stock unchanged. */
+    suspend fun updateProductDetails(product: ProductEntity) {
+        database.withTransaction {
+            val current = requireNotNull(productDao.getProductById(product.id)) {
+                "Product no longer exists"
+            }
+            productDao.updateProduct(
+                product.copy(
+                    stockQuantity = current.stockQuantity,
+                    isSynced = false,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
     }
 
     /**

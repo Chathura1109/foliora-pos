@@ -2,22 +2,27 @@ package com.foliora.pos.data.sync
 
 import com.foliora.pos.data.local.dao.CategoryDao
 import com.foliora.pos.data.local.dao.CustomerDao
+import com.foliora.pos.data.local.dao.InventoryBatchDao
 import com.foliora.pos.data.local.dao.ProductDao
 import com.foliora.pos.data.local.dao.PurchaseDao
 import com.foliora.pos.data.local.dao.PurchaseItemDao
 import com.foliora.pos.data.local.dao.SaleDao
 import com.foliora.pos.data.local.dao.SaleItemDao
 import com.foliora.pos.data.local.dao.SupplierDao
+import com.foliora.pos.data.local.dao.StockAdjustmentDao
 import com.foliora.pos.data.local.dao.UserDao
 import com.foliora.pos.data.local.entity.CategoryEntity
 import com.foliora.pos.data.local.entity.CustomerEntity
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.PurchaseEntity
 import com.foliora.pos.data.local.entity.PurchaseItemEntity
 import com.foliora.pos.data.local.entity.SaleEntity
 import com.foliora.pos.data.local.entity.SaleItemEntity
 import com.foliora.pos.data.local.entity.SupplierEntity
+import com.foliora.pos.data.local.entity.StockAdjustmentEntity
 import com.foliora.pos.data.local.entity.UserEntity
+import com.foliora.pos.data.local.entity.priceToCents
 import com.google.firebase.firestore.DocumentSnapshot
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -32,6 +37,8 @@ class SyncRelationshipMapper @Inject constructor(
     private val customerDao: CustomerDao,
     private val supplierDao: SupplierDao,
     private val productDao: ProductDao,
+    private val inventoryBatchDao: InventoryBatchDao,
+    private val stockAdjustmentDao: StockAdjustmentDao,
     private val purchaseDao: PurchaseDao,
     private val purchaseItemDao: PurchaseItemDao,
     private val saleDao: SaleDao,
@@ -131,11 +138,18 @@ class SyncRelationshipMapper @Inject constructor(
         val productFirebaseId = productDao.getProductById(item.productId)
             ?.firebaseId
             .requireReference("product", item.productId)
+        val batchFirebaseId = item.batchId?.let { batchId ->
+            inventoryBatchDao.getBatchById(batchId)
+                ?.firebaseId
+                .requireReference("inventory batch", batchId)
+        }
         return mapOf(
             "purchaseFirebaseId" to purchaseFirebaseId,
             "productFirebaseId" to productFirebaseId,
+            "batchFirebaseId" to batchFirebaseId,
             "quantity" to item.quantity,
             "buyingPrice" to item.buyingPrice,
+            "sellingPrice" to item.sellingPrice,
             "subtotal" to item.subtotal,
             "isSynced" to true,
             "firebaseId" to item.firebaseId,
@@ -174,16 +188,70 @@ class SyncRelationshipMapper @Inject constructor(
         val productFirebaseId = productDao.getProductById(item.productId)
             ?.firebaseId
             .requireReference("product", item.productId)
+        val batchFirebaseId = item.batchId?.let { batchId ->
+            inventoryBatchDao.getBatchById(batchId)
+                ?.firebaseId
+                .requireReference("inventory batch", batchId)
+        }
         return mapOf(
             "saleFirebaseId" to saleFirebaseId,
             "productFirebaseId" to productFirebaseId,
+            "batchFirebaseId" to batchFirebaseId,
             "quantity" to item.quantity,
             "sellingPrice" to item.sellingPrice,
+            "unitCost" to item.unitCost,
             "subtotal" to item.subtotal,
             "isSynced" to true,
             "firebaseId" to item.firebaseId,
             "createdAt" to item.createdAt,
             "updatedAt" to item.updatedAt
+        )
+    }
+
+    suspend fun inventoryBatchToCloud(batch: InventoryBatchEntity): Map<String, Any?> {
+        val productFirebaseId = productDao.getProductById(batch.productId)
+            ?.firebaseId
+            .requireReference("product", batch.productId)
+        return mapOf(
+            "productFirebaseId" to productFirebaseId,
+            "originalQuantity" to batch.originalQuantity,
+            "remainingQuantity" to batch.remainingQuantity,
+            "unitCost" to batch.unitCost,
+            "sellingPrice" to batch.sellingPrice,
+            "unitCostCents" to batch.unitCostCents,
+            "sellingPriceCents" to batch.sellingPriceCents,
+            "receivedAt" to batch.receivedAt,
+            "isSynced" to true,
+            "firebaseId" to batch.firebaseId,
+            "createdAt" to batch.createdAt,
+            "updatedAt" to batch.updatedAt
+        )
+    }
+
+    suspend fun stockAdjustmentToCloud(adjustment: StockAdjustmentEntity): Map<String, Any?> {
+        val productFirebaseId = productDao.getProductById(adjustment.productId)
+            ?.firebaseId
+            .requireReference("product", adjustment.productId)
+        val batchFirebaseId = inventoryBatchDao.getBatchById(adjustment.batchId)
+            ?.firebaseId
+            .requireReference("inventory batch", adjustment.batchId)
+        val adjustedByFirebaseId = userDao.getUserById(adjustment.adjustedBy)
+            ?.stableFirebaseId()
+            .requireReference("adjusting user", adjustment.adjustedBy)
+        return mapOf(
+            "productFirebaseId" to productFirebaseId,
+            "batchFirebaseId" to batchFirebaseId,
+            "adjustedByFirebaseId" to adjustedByFirebaseId,
+            "adjustmentType" to adjustment.adjustmentType,
+            "quantity" to adjustment.quantity,
+            "reason" to adjustment.reason,
+            "notes" to adjustment.notes,
+            "resultingBatchQuantity" to adjustment.resultingBatchQuantity,
+            "resultingProductQuantity" to adjustment.resultingProductQuantity,
+            "isSynced" to true,
+            "firebaseId" to adjustment.firebaseId,
+            "createdAt" to adjustment.createdAt,
+            "updatedAt" to adjustment.updatedAt
         )
     }
 
@@ -263,10 +331,15 @@ class SyncRelationshipMapper @Inject constructor(
             ?: missingParent("purchase", purchaseFirebaseId, "purchase item", document.id)
         val product = productDao.getProductByFirebaseId(productFirebaseId)
             ?: missingParent("product", productFirebaseId, "purchase item", document.id)
+        val batchId = document.getString(FIELD_BATCH_FIREBASE_ID)?.let { batchFirebaseId ->
+            inventoryBatchDao.getBatchByFirebaseId(batchFirebaseId)?.id
+                ?: missingParent("inventory batch", batchFirebaseId, "purchase item", document.id)
+        }
         return cloud.copy(
             id = purchaseItemDao.getPurchaseItemByFirebaseId(document.id)?.id ?: 0,
             purchaseId = purchase.id,
             productId = product.id,
+            batchId = batchId,
             firebaseId = document.id,
             isSynced = true
         )
@@ -298,10 +371,53 @@ class SyncRelationshipMapper @Inject constructor(
             ?: missingParent("sale", saleFirebaseId, "sale item", document.id)
         val product = productDao.getProductByFirebaseId(productFirebaseId)
             ?: missingParent("product", productFirebaseId, "sale item", document.id)
+        val batchId = document.getString(FIELD_BATCH_FIREBASE_ID)?.let { batchFirebaseId ->
+            inventoryBatchDao.getBatchByFirebaseId(batchFirebaseId)?.id
+                ?: missingParent("inventory batch", batchFirebaseId, "sale item", document.id)
+        }
         return cloud.copy(
             id = saleItemDao.getSaleItemByFirebaseId(document.id)?.id ?: 0,
             saleId = sale.id,
             productId = product.id,
+            batchId = batchId,
+            firebaseId = document.id,
+            isSynced = true
+        )
+    }
+
+    suspend fun inventoryBatchFromCloud(document: DocumentSnapshot): InventoryBatchEntity? {
+        val cloud = document.toObject(InventoryBatchEntity::class.java) ?: return null
+        val productFirebaseId = document.requireReference(FIELD_PRODUCT_FIREBASE_ID)
+        val product = productDao.getProductByFirebaseId(productFirebaseId)
+            ?: missingParent("product", productFirebaseId, "inventory batch", document.id)
+        val existing = inventoryBatchDao.getBatchByFirebaseId(document.id)
+        return cloud.copy(
+            id = existing?.id ?: 0,
+            productId = product.id,
+            purchaseItemId = existing?.purchaseItemId,
+            unitCostCents = priceToCents(cloud.unitCost),
+            sellingPriceCents = priceToCents(cloud.sellingPrice),
+            firebaseId = document.id,
+            isSynced = true
+        )
+    }
+
+    suspend fun stockAdjustmentFromCloud(document: DocumentSnapshot): StockAdjustmentEntity? {
+        val cloud = document.toObject(StockAdjustmentEntity::class.java) ?: return null
+        val productFirebaseId = document.requireReference(FIELD_PRODUCT_FIREBASE_ID)
+        val batchFirebaseId = document.requireReference(FIELD_BATCH_FIREBASE_ID)
+        val adjustedByFirebaseId = document.requireReference(FIELD_ADJUSTED_BY_FIREBASE_ID)
+        val product = productDao.getProductByFirebaseId(productFirebaseId)
+            ?: missingParent("product", productFirebaseId, "stock adjustment", document.id)
+        val batch = inventoryBatchDao.getBatchByFirebaseId(batchFirebaseId)
+            ?: missingParent("inventory batch", batchFirebaseId, "stock adjustment", document.id)
+        val adjustedBy = userDao.getUserByFirebaseUid(adjustedByFirebaseId)
+            ?: missingParent("user", adjustedByFirebaseId, "stock adjustment", document.id)
+        return cloud.copy(
+            id = stockAdjustmentDao.getByFirebaseId(document.id)?.id ?: 0,
+            productId = product.id,
+            batchId = batch.id,
+            adjustedBy = adjustedBy.id,
             firebaseId = document.id,
             isSynced = true
         )
@@ -340,6 +456,9 @@ class SyncRelationshipMapper @Inject constructor(
         private const val FIELD_SUPPLIER_FIREBASE_ID = "supplierFirebaseId"
         private const val FIELD_CREATED_BY_FIREBASE_ID = "createdByFirebaseId"
         private const val FIELD_PRODUCT_FIREBASE_ID = "productFirebaseId"
+        private const val FIELD_BATCH_FIREBASE_ID = "batchFirebaseId"
+        private const val FIELD_ADJUSTED_BY_FIREBASE_ID = "adjustedByFirebaseId"
+        private const val FIELD_PURCHASE_ITEM_FIREBASE_ID = "purchaseItemFirebaseId"
         private const val FIELD_PURCHASE_FIREBASE_ID = "purchaseFirebaseId"
         private const val FIELD_SALE_FIREBASE_ID = "saleFirebaseId"
     }

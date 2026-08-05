@@ -3,10 +3,12 @@ package com.foliora.pos.ui.screens.sale
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.foliora.pos.data.local.entity.CustomerEntity
+import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.SaleEntity
 import com.foliora.pos.data.local.entity.SaleItemEntity
 import com.foliora.pos.data.repository.CustomerRepository
+import com.foliora.pos.data.repository.InventoryBatchRepository
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.SaleRepository
 import com.foliora.pos.data.repository.UserRepository
@@ -28,13 +30,14 @@ import javax.inject.Inject
  */
 data class CartItem(
     val product: ProductEntity,
+    val batch: InventoryBatchEntity,
     val quantity: Double
 ) {
     /**
-     * Line item total calculated as quantity multiplied by the product selling price.
+     * Line item total calculated using the selected batch selling price.
      */
     val subtotal: Double
-        get() = product.sellingPrice * quantity
+        get() = batch.sellingPrice * quantity
 }
 
 /**
@@ -51,11 +54,22 @@ data class CartItem(
 class NewSaleViewModel @Inject constructor(
     private val productRepository: ProductRepository,
     private val customerRepository: CustomerRepository,
+    private val inventoryBatchRepository: InventoryBatchRepository,
     private val saleRepository: SaleRepository,
     private val userRepository: UserRepository
 ) : ViewModel() {
 
     private val firebaseAuth = FirebaseAuth.getInstance()
+
+    private val _currentUserRole = MutableStateFlow("CASHIER")
+    val currentUserRole: StateFlow<String> = _currentUserRole.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            val firebaseUid = firebaseAuth.currentUser?.uid ?: return@launch
+            _currentUserRole.value = userRepository.getUserByFirebaseUid(firebaseUid)?.role ?: "CASHIER"
+        }
+    }
 
     /**
      * Active products available in inventory for selection.
@@ -76,6 +90,15 @@ class NewSaleViewModel @Inject constructor(
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
         )
+
+    /** Non-exhausted batches available for manual selection. */
+    val availableBatches: StateFlow<List<InventoryBatchEntity>> =
+        inventoryBatchRepository.getAvailableBatches()
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
 
     private val _cartItems = MutableStateFlow<List<CartItem>>(emptyList())
     /**
@@ -120,21 +143,26 @@ class NewSaleViewModel @Inject constructor(
      * @param product The product to add.
      * @param quantity The quantity to add.
      */
-    fun addToCart(product: ProductEntity, quantity: Double) {
+    fun addToCart(product: ProductEntity, batch: InventoryBatchEntity, quantity: Double) {
         if (!quantity.isFinite() || quantity <= 0) {
             _errorMessage.value = "Enter a valid quantity greater than zero"
             return
         }
 
+        if (batch.productId != product.id) {
+            _errorMessage.value = "Selected stock batch does not belong to ${product.name}"
+            return
+        }
+
         val currentList = _cartItems.value.toMutableList()
-        val existingIndex = currentList.indexOfFirst { it.product.id == product.id }
+        val existingIndex = currentList.indexOfFirst { it.batch.id == batch.id }
         val requestedQuantity = if (existingIndex >= 0) {
             currentList[existingIndex].quantity + quantity
         } else {
             quantity
         }
 
-        if (!isQuantityAvailable(product, requestedQuantity)) return
+        if (!isQuantityAvailable(product, batch, requestedQuantity)) return
 
         if (existingIndex >= 0) {
             // Update existing cart item quantity by adding requested amount
@@ -142,7 +170,7 @@ class NewSaleViewModel @Inject constructor(
             currentList[existingIndex] = existingItem.copy(quantity = requestedQuantity)
         } else {
             // Add new cart item entry
-            currentList.add(CartItem(product = product, quantity = quantity))
+            currentList.add(CartItem(product = product, batch = batch, quantity = quantity))
         }
 
         _cartItems.value = currentList
@@ -153,8 +181,8 @@ class NewSaleViewModel @Inject constructor(
      *
      * @param product Product to remove.
      */
-    fun removeFromCart(product: ProductEntity) {
-        _cartItems.value = _cartItems.value.filter { it.product.id != product.id }
+    fun removeFromCart(cartItem: CartItem) {
+        _cartItems.value = _cartItems.value.filter { it.batch.id != cartItem.batch.id }
     }
 
     /**
@@ -164,21 +192,21 @@ class NewSaleViewModel @Inject constructor(
      * @param product Product to update.
      * @param quantity New quantity value.
      */
-    fun updateQuantity(product: ProductEntity, quantity: Double) {
+    fun updateQuantity(cartItem: CartItem, quantity: Double) {
         if (!quantity.isFinite()) {
             _errorMessage.value = "Enter a valid quantity"
             return
         }
 
         if (quantity <= 0) {
-            removeFromCart(product)
+            removeFromCart(cartItem)
             return
         }
 
-        if (!isQuantityAvailable(product, quantity)) return
+        if (!isQuantityAvailable(cartItem.product, cartItem.batch, quantity)) return
 
         _cartItems.value = _cartItems.value.map { item ->
-            if (item.product.id == product.id) {
+            if (item.batch.id == cartItem.batch.id) {
                 item.copy(quantity = quantity)
             } else {
                 item
@@ -186,14 +214,19 @@ class NewSaleViewModel @Inject constructor(
         }
     }
 
-    private fun isQuantityAvailable(product: ProductEntity, requestedQuantity: Double): Boolean {
-        val availableQuantity = product.stockQuantity
+    private fun isQuantityAvailable(
+        product: ProductEntity,
+        batch: InventoryBatchEntity,
+        requestedQuantity: Double
+    ): Boolean {
+        val availableQuantity = batch.remainingQuantity
         if (!availableQuantity.isFinite() || availableQuantity < 0) {
-            _errorMessage.value = "Invalid stock quantity for ${product.name}"
+            _errorMessage.value = "Invalid stock quantity for the selected ${product.name} batch"
             return false
         }
         if (!requestedQuantity.isFinite() || requestedQuantity > availableQuantity) {
-            _errorMessage.value = "Only $availableQuantity ${product.unit} of ${product.name} is available"
+            _errorMessage.value =
+                "Only $availableQuantity ${product.unit} remains in the selected batch"
             return false
         }
         return true
@@ -291,8 +324,10 @@ class NewSaleViewModel @Inject constructor(
                         id = 0,
                         saleId = 0, // Assigned inside completeSale
                         productId = cartItem.product.id,
+                        batchId = cartItem.batch.id,
                         quantity = cartItem.quantity,
-                        sellingPrice = cartItem.product.sellingPrice,
+                        sellingPrice = cartItem.batch.sellingPrice,
+                        unitCost = cartItem.batch.unitCost,
                         subtotal = cartItem.subtotal,
                         isSynced = false,
                         firebaseId = null,

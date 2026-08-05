@@ -30,12 +30,14 @@ import com.foliora.pos.data.local.entity.*
         SupplierEntity::class,
         PurchaseEntity::class,
         PurchaseItemEntity::class,
+        InventoryBatchEntity::class,
+        StockAdjustmentEntity::class,
         SaleEntity::class,
         SaleItemEntity::class,
         SettingEntity::class,
         PendingDeletionEntity::class
     ],
-    version = 4,
+    version = 8,
     exportSchema = false // Set to true in production for migration tracking
 )
 abstract class FolioraDatabase : RoomDatabase() {
@@ -48,6 +50,8 @@ abstract class FolioraDatabase : RoomDatabase() {
     abstract fun supplierDao(): SupplierDao
     abstract fun purchaseDao(): PurchaseDao
     abstract fun purchaseItemDao(): PurchaseItemDao
+    abstract fun inventoryBatchDao(): InventoryBatchDao
+    abstract fun stockAdjustmentDao(): StockAdjustmentDao
     abstract fun saleDao(): SaleDao
     abstract fun saleItemDao(): SaleItemDao
     abstract fun settingDao(): SettingDao
