@@ -5,6 +5,7 @@ import androidx.room.withTransaction
 import com.foliora.pos.data.local.FolioraDatabase
 import com.foliora.pos.data.local.dao.InventoryBatchDao
 import com.foliora.pos.data.local.dao.ProductDao
+import com.foliora.pos.data.local.dao.SaleItemDao
 import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.priceToCents
@@ -30,7 +31,8 @@ import javax.inject.Inject
 class ProductRepository @Inject constructor(
     private val database: FolioraDatabase,
     private val productDao: ProductDao,
-    private val inventoryBatchDao: InventoryBatchDao
+    private val inventoryBatchDao: InventoryBatchDao,
+    private val saleItemDao: SaleItemDao
 ) {
 
     /**
@@ -90,6 +92,76 @@ class ProductRepository @Inject constructor(
                     updatedAt = System.currentTimeMillis()
                 )
             )
+        }
+    }
+
+    /** Returns false after this batch has appeared in any completed sale. */
+    suspend fun canEditBatchUnitCost(batchId: Int): Boolean =
+        !saleItemDao.hasItemsForBatch(batchId)
+
+    /**
+     * Changes prices for future sales without touching historical sale-item snapshots.
+     * Cost is immutable after the batch has been used in a sale.
+     */
+    suspend fun updateBatchPrices(
+        productId: Int,
+        batchId: Int,
+        unitCost: Double,
+        sellingPrice: Double
+    ) {
+        require(unitCost.isFinite() && unitCost >= 0) { "Batch cost must be a valid non-negative number" }
+        require(sellingPrice.isFinite() && sellingPrice >= 0) {
+            "Batch selling price must be a valid non-negative number"
+        }
+
+        database.withTransaction {
+            val product = requireNotNull(productDao.getProductById(productId)) {
+                "Product no longer exists"
+            }
+            val batch = requireNotNull(inventoryBatchDao.getBatchById(batchId)) {
+                "Stock batch no longer exists"
+            }
+            require(batch.productId == product.id) { "Selected batch does not belong to this product" }
+            require(batch.remainingQuantity > 0) { "Exhausted batches cannot be edited" }
+
+            val unitCostCents = priceToCents(unitCost)
+            val sellingPriceCents = priceToCents(sellingPrice)
+            val costChanged = unitCostCents != batch.unitCostCents
+            if (costChanged) {
+                require(!saleItemDao.hasItemsForBatch(batch.id)) {
+                    "Batch cost is locked because stock from this batch has already been sold"
+                }
+            }
+
+            if (!costChanged && sellingPriceCents == batch.sellingPriceCents) return@withTransaction
+
+            val now = System.currentTimeMillis()
+            inventoryBatchDao.updateBatch(
+                batch.copy(
+                    unitCost = unitCost,
+                    sellingPrice = sellingPrice,
+                    unitCostCents = unitCostCents,
+                    sellingPriceCents = sellingPriceCents,
+                    isSynced = false,
+                    updatedAt = now
+                )
+            )
+
+            // Keep the legacy product defaults aligned with its newest batch for future restocks.
+            val newestBatch = inventoryBatchDao.getBatchesForProduct(product.id).firstOrNull()
+            if (newestBatch != null &&
+                (priceToCents(product.buyingPrice) != newestBatch.unitCostCents ||
+                    priceToCents(product.sellingPrice) != newestBatch.sellingPriceCents)
+            ) {
+                productDao.updateProduct(
+                    product.copy(
+                        buyingPrice = newestBatch.unitCost,
+                        sellingPrice = newestBatch.sellingPrice,
+                        isSynced = false,
+                        updatedAt = now
+                    )
+                )
+            }
         }
     }
 
@@ -162,6 +234,8 @@ class ProductRepository @Inject constructor(
     suspend fun getUnsyncedProducts(): List<ProductEntity> {
         return productDao.getUnsyncedProducts()
     }
+
+    fun observePendingSyncCount(): Flow<Int> = productDao.observePendingSyncCount()
 
     /**
      * Uploads a device-local product photo to Cloudinary and returns the Firestore-safe product copy.

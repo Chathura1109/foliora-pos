@@ -46,6 +46,9 @@ interface SaleItemDao {
     @Query("SELECT * FROM sale_items WHERE saleId = :saleId")
     fun getItemsBySaleId(saleId: Int): Flow<List<SaleItemEntity>>
 
+    @Query("SELECT EXISTS(SELECT 1 FROM sale_items WHERE batchId = :batchId LIMIT 1)")
+    suspend fun hasItemsForBatch(batchId: Int): Boolean
+
     @Query("SELECT * FROM sale_items WHERE firebaseId = :firebaseId LIMIT 1")
     suspend fun getSaleItemByFirebaseId(firebaseId: String): SaleItemEntity?
 

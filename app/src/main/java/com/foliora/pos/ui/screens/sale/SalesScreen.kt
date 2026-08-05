@@ -56,7 +56,12 @@ import com.foliora.pos.data.local.entity.CustomerEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.SaleEntity
 import com.foliora.pos.data.local.entity.SaleItemEntity
+import com.foliora.pos.data.local.entity.SettingEntity
+import com.foliora.pos.data.local.entity.UserEntity
 import com.foliora.pos.ui.components.FolioraTopAppBar
+import com.foliora.pos.ui.receipt.ReceiptData
+import com.foliora.pos.ui.receipt.ReceiptDialog
+import com.foliora.pos.ui.receipt.ReceiptLineItem
 import kotlinx.coroutines.flow.Flow
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -80,12 +85,16 @@ fun SalesScreen(
     val sales by viewModel.sales.collectAsStateWithLifecycle()
     val customers by viewModel.customers.collectAsStateWithLifecycle()
     val products by viewModel.products.collectAsStateWithLifecycle()
+    val users by viewModel.users.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val role by viewModel.currentUserRole.collectAsStateWithLifecycle()
 
     SalesScreenContent(
         sales = sales,
         customers = customers,
         products = products,
+        users = users,
+        settings = settings,
         userRole = role,
         onBackClick = onBackClick,
         onNewSaleClick = onNavigateToNewSale,
@@ -106,6 +115,8 @@ fun SalesScreenContent(
     sales: List<SaleEntity>,
     customers: List<CustomerEntity>,
     products: List<ProductEntity>,
+    users: List<UserEntity>,
+    settings: SettingEntity?,
     userRole: String,
     onBackClick: (() -> Unit)?,
     onNewSaleClick: () -> Unit,
@@ -122,6 +133,7 @@ fun SalesScreenContent(
     val customerMap = remember(customers) {
         customers.associateBy { it.id }
     }
+    val userMap = remember(users) { users.associateBy { it.id } }
 
     // Filter sales by ID, customer name, payment method, or status string
     val filteredSales = remember(sales, searchQuery, customerMap) {
@@ -271,11 +283,14 @@ fun SalesScreenContent(
         )
     }
 
-    // Sale Details Dialog
+    // Reusable receipt preview for a saved sale.
     if (saleDetailsToShow != null) {
         SaleDetailsDialog(
             sale = saleDetailsToShow!!,
             products = products,
+            customerName = saleDetailsToShow!!.customerId?.let { customerMap[it]?.name },
+            cashierName = userMap[saleDetailsToShow!!.cashierId]?.name ?: "Unknown",
+            settings = settings,
             onGetSaleItems = onGetSaleItems,
             onDismiss = { saleDetailsToShow = null }
         )
@@ -539,81 +554,43 @@ fun SaleDeleteConfirmationDialog(
 fun SaleDetailsDialog(
     sale: SaleEntity,
     products: List<ProductEntity>,
+    customerName: String?,
+    cashierName: String,
+    settings: SettingEntity?,
     onGetSaleItems: (Int) -> Flow<List<SaleItemEntity>>,
     onDismiss: () -> Unit
 ) {
     val itemsFlow = remember(sale.id) { onGetSaleItems(sale.id) }
     val items by itemsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    
     val productMap = remember(products) { products.associateBy { it.id } }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(text = "Sale #${sale.id} Details", fontWeight = FontWeight.Bold)
-        },
-        text = {
-            if (items.isEmpty()) {
-                Text(text = "Loading items...", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(items) { item ->
-                        val productName = productMap[item.productId]?.name ?: "Unknown Product"
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = productName,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = "${item.quantity} x Rs. ${String.format(Locale.US, "%.2f", item.sellingPrice)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Text(
-                                text = "Rs. ${String.format(Locale.US, "%.2f", item.subtotal)}",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                    
-                    item {
-                        androidx.compose.material3.HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Total",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                            Text(
-                                text = "Rs. ${String.format(Locale.US, "%.2f", sale.totalAmount)}",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(text = "Close")
-            }
-        }
+    val receipt = remember(sale, items, productMap, customerName, cashierName, settings) {
+        ReceiptData(
+            saleId = sale.id,
+            date = sale.date,
+            shopName = settings?.shopName ?: "Foliora",
+            shopAddress = settings?.address.orEmpty(),
+            shopPhone = settings?.phoneNumber.orEmpty(),
+            cashierName = cashierName,
+            customerName = customerName,
+            paymentMethod = sale.paymentMethod,
+            status = sale.status,
+            items = items.map { item ->
+                ReceiptLineItem(
+                    productName = productMap[item.productId]?.name ?: "Product #${item.productId}",
+                    quantity = item.quantity,
+                    sellingPrice = item.sellingPrice,
+                    subtotal = item.subtotal
+                )
+            },
+            totalAmount = sale.totalAmount,
+            receiptMessage = settings?.receiptMessage.orEmpty()
+        )
+    }
+    ReceiptDialog(
+        receipt = receipt,
+        onDismiss = onDismiss,
+        dismissLabel = "Close",
+        isLoadingItems = items.isEmpty()
     )
 }

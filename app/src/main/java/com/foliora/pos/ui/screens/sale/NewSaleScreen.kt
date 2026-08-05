@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.ShoppingCart
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -80,6 +81,7 @@ import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.ui.components.ErrorDialog
 import com.foliora.pos.ui.components.FolioraTopAppBar
+import com.foliora.pos.ui.receipt.ReceiptDialog
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -109,6 +111,9 @@ fun NewSaleScreen(
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val currentUserRole by viewModel.currentUserRole.collectAsStateWithLifecycle()
+    val hasPendingInventorySync by viewModel.hasPendingInventorySync.collectAsStateWithLifecycle()
+    val inventorySyncStatus by viewModel.inventorySyncStatus.collectAsStateWithLifecycle()
+    val completedReceipt by viewModel.completedReceipt.collectAsStateWithLifecycle()
 
     NewSaleScreenContent(
         products = products,
@@ -121,16 +126,29 @@ fun NewSaleScreen(
         isProcessing = isProcessing,
         errorMessage = errorMessage,
         showCostPrice = currentUserRole == "OWNER",
+        hasPendingInventorySync = hasPendingInventorySync,
+        inventorySyncStatus = inventorySyncStatus,
         onBackClick = onBackClick,
+        onSyncInventory = viewModel::syncInventory,
         onAddToCart = { product, batch, qty -> viewModel.addToCart(product, batch, qty) },
         onRemoveFromCart = viewModel::removeFromCart,
         onUpdateQuantity = viewModel::updateQuantity,
         onSelectCustomer = { customer -> viewModel.selectCustomer(customer) },
         onSelectPaymentMethod = { method -> viewModel.setPaymentMethod(method) },
         onSelectSaleStatus = { status -> viewModel.setSaleStatus(status) },
-        onCheckout = { viewModel.checkout(onSuccess = onCheckoutSuccess) },
+        onCheckout = viewModel::checkout,
         onDismissError = { viewModel.clearErrorMessage() }
     )
+
+    completedReceipt?.let { receipt ->
+        ReceiptDialog(
+            receipt = receipt,
+            onDismiss = {
+                viewModel.clearCompletedReceipt()
+                onCheckoutSuccess()
+            }
+        )
+    }
 }
 
 /**
@@ -150,7 +168,10 @@ fun NewSaleScreenContent(
     isProcessing: Boolean,
     errorMessage: String?,
     showCostPrice: Boolean,
+    hasPendingInventorySync: Boolean,
+    inventorySyncStatus: InventorySyncStatus,
     onBackClick: () -> Unit,
+    onSyncInventory: () -> Unit,
     onAddToCart: (ProductEntity, InventoryBatchEntity, Double) -> Unit,
     onRemoveFromCart: (CartItem) -> Unit,
     onUpdateQuantity: (CartItem, Double) -> Unit,
@@ -194,6 +215,12 @@ fun NewSaleScreenContent(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            InventorySyncBanner(
+                hasPendingInventorySync = hasPendingInventorySync,
+                syncStatus = inventorySyncStatus,
+                onSyncInventory = onSyncInventory
+            )
+
             // TOP SECTION: Products Selection Grid (Weight 1f)
             Column(
                 modifier = Modifier
@@ -477,7 +504,11 @@ fun NewSaleScreenContent(
 
                         Button(
                             onClick = onCheckout,
-                            enabled = cartItems.isNotEmpty() && !isProcessing,
+                            enabled = cartItems.isNotEmpty() &&
+                                !isProcessing &&
+                                !hasPendingInventorySync &&
+                                !inventorySyncStatus.isInProgress &&
+                                !inventorySyncStatus.isError,
                             shape = RoundedCornerShape(12.dp),
                             contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp)
                         ) {
@@ -531,6 +562,78 @@ fun NewSaleScreenContent(
             message = errorMessage,
             onDismiss = onDismissError
         )
+    }
+}
+
+@Composable
+private fun InventorySyncBanner(
+    hasPendingInventorySync: Boolean,
+    syncStatus: InventorySyncStatus,
+    onSyncInventory: () -> Unit
+) {
+    val containerColor = if (syncStatus.isError) {
+        MaterialTheme.colorScheme.errorContainer
+    } else {
+        MaterialTheme.colorScheme.primaryContainer
+    }
+    val contentColor = if (syncStatus.isError) {
+        MaterialTheme.colorScheme.onErrorContainer
+    } else {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    }
+    val message = when {
+        syncStatus.isInProgress -> syncStatus.message ?: "Synchronising inventory..."
+        syncStatus.isError -> syncStatus.message ?: "Inventory sync failed."
+        hasPendingInventorySync -> "Inventory changes must be synchronised before checkout."
+        else -> syncStatus.message ?: "Inventory is up to date."
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            if (syncStatus.isInProgress) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    color = contentColor,
+                    strokeWidth = 2.dp
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Sync,
+                    contentDescription = null,
+                    tint = contentColor
+                )
+            }
+
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = contentColor
+            )
+
+            Button(
+                onClick = onSyncInventory,
+                enabled = !syncStatus.isInProgress,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = contentColor,
+                    contentColor = containerColor
+                )
+            ) {
+                Text(if (syncStatus.isError) "Try Again" else "Sync Inventory")
+            }
+        }
     }
 }
 

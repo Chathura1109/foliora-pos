@@ -21,6 +21,11 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+data class BatchPriceEditState(
+    val batch: InventoryBatchEntity,
+    val canEditUnitCost: Boolean
+)
+
 /**
  * ViewModel for managing product inventory in Foliora POS.
  * Connects UI layer with [ProductRepository] for product CRUD operations
@@ -43,6 +48,12 @@ class ProductViewModel @Inject constructor(
 
     private val _isAdjustingStock = MutableStateFlow(false)
     val isAdjustingStock: StateFlow<Boolean> = _isAdjustingStock.asStateFlow()
+
+    private val _batchPriceEditState = MutableStateFlow<BatchPriceEditState?>(null)
+    val batchPriceEditState: StateFlow<BatchPriceEditState?> = _batchPriceEditState.asStateFlow()
+
+    private val _isUpdatingBatchPrices = MutableStateFlow(false)
+    val isUpdatingBatchPrices: StateFlow<Boolean> = _isUpdatingBatchPrices.asStateFlow()
 
     private val _currentUserRole = MutableStateFlow<String>("CASHIER") // Default to Cashier for safety
     val currentUserRole: StateFlow<String> = _currentUserRole.asStateFlow()
@@ -210,6 +221,55 @@ class ProductViewModel @Inject constructor(
             } finally {
                 _isAdjustingStock.value = false
             }
+        }
+    }
+
+    fun openBatchPriceEditor(batch: InventoryBatchEntity) {
+        launchCrudCatching("Unable to open batch editor", onError = { _errorMessage.value = it }) {
+            requireCurrentOwner()
+            val currentBatch = requireNotNull(inventoryBatchRepository.getBatchById(batch.id)) {
+                "Stock batch no longer exists"
+            }
+            require(currentBatch.remainingQuantity > 0) { "Exhausted batches cannot be edited" }
+            _batchPriceEditState.value = BatchPriceEditState(
+                batch = currentBatch,
+                canEditUnitCost = productRepository.canEditBatchUnitCost(currentBatch.id)
+            )
+        }
+    }
+
+    fun dismissBatchPriceEditor() {
+        if (!_isUpdatingBatchPrices.value) _batchPriceEditState.value = null
+    }
+
+    fun updateBatchPrices(unitCost: Double, sellingPrice: Double) {
+        val editState = _batchPriceEditState.value ?: return
+        if (_isUpdatingBatchPrices.value) return
+        _isUpdatingBatchPrices.value = true
+
+        launchCrudCatching("Unable to update batch prices", onError = { _errorMessage.value = it }) {
+            try {
+                requireCurrentOwner()
+                productRepository.updateBatchPrices(
+                    productId = editState.batch.productId,
+                    batchId = editState.batch.id,
+                    unitCost = unitCost,
+                    sellingPrice = sellingPrice
+                )
+                _batchPriceEditState.value = null
+            } finally {
+                _isUpdatingBatchPrices.value = false
+            }
+        }
+    }
+
+    private suspend fun requireCurrentOwner() {
+        val firebaseUid = FirebaseAuth.getInstance().currentUser?.uid
+            ?: error("Please log in again")
+        val currentUser = userRepository.getUserByFirebaseUid(firebaseUid)
+            ?: error("Current user profile does not exist locally. Sync users and try again")
+        require(currentUser.role == "OWNER" && currentUser.isActive) {
+            "Only an active owner can edit batch prices"
         }
     }
 

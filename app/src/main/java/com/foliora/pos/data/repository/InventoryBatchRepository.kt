@@ -20,6 +20,9 @@ class InventoryBatchRepository @Inject constructor(
     suspend fun getUnsyncedBatches(): List<InventoryBatchEntity> =
         inventoryBatchDao.getUnsyncedBatches()
 
+    fun observePendingSyncCount(): Flow<Int> =
+        inventoryBatchDao.observePendingSyncCount()
+
     suspend fun insertBatch(batch: InventoryBatchEntity): Long =
         inventoryBatchDao.insertBatch(batch.copy(updatedAt = System.currentTimeMillis()))
 
