@@ -6,9 +6,12 @@ import com.foliora.pos.data.local.entity.CustomerEntity
 import com.foliora.pos.data.local.entity.SaleEntity
 import com.foliora.pos.data.local.entity.ProductEntity
 import com.foliora.pos.data.local.entity.SaleItemEntity
+import com.foliora.pos.data.local.entity.SettingEntity
+import com.foliora.pos.data.local.entity.UserEntity
 import com.foliora.pos.data.repository.CustomerRepository
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.SaleRepository
+import com.foliora.pos.data.repository.SettingRepository
 import com.foliora.pos.data.repository.UserRepository
 import com.foliora.pos.ui.viewmodel.launchCrudCatching
 import com.google.firebase.auth.FirebaseAuth
@@ -31,14 +34,25 @@ class SalesViewModel @Inject constructor(
     private val saleRepository: SaleRepository,
     private val customerRepository: CustomerRepository,
     private val userRepository: UserRepository,
-    private val productRepository: ProductRepository
+    private val productRepository: ProductRepository,
+    private val settingRepository: SettingRepository
 ) : ViewModel() {
 
     private val _currentUserRole = MutableStateFlow<String>("CASHIER") // Default to Cashier for safety
     val currentUserRole: StateFlow<String> = _currentUserRole.asStateFlow()
 
+    private val _settings = MutableStateFlow<SettingEntity?>(null)
+    val settings: StateFlow<SettingEntity?> = _settings.asStateFlow()
+
     init {
         fetchCurrentUserRole()
+        loadSettings()
+    }
+
+    private fun loadSettings() {
+        viewModelScope.launch {
+            _settings.value = settingRepository.getSettings()
+        }
     }
 
     private fun fetchCurrentUserRole() {
@@ -78,6 +92,14 @@ class SalesViewModel @Inject constructor(
      * StateFlow exposing all products for UI lookup.
      */
     val products: StateFlow<List<ProductEntity>> = productRepository.getAllProducts()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+    /** Users are used only to show the saved cashier name on historical receipts. */
+    val users: StateFlow<List<UserEntity>> = userRepository.getAllUsers()
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),

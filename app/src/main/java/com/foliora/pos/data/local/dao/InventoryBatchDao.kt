@@ -65,4 +65,10 @@ interface InventoryBatchDao {
 
     @Query("SELECT * FROM inventory_batches WHERE isSynced = 0")
     suspend fun getUnsyncedBatches(): List<InventoryBatchEntity>
+
+    @Query(
+        "SELECT COUNT(*) FROM inventory_batches " +
+            "WHERE isSynced = 0 OR firebaseId IS NULL OR TRIM(firebaseId) = ''"
+    )
+    fun observePendingSyncCount(): Flow<Int>
 }

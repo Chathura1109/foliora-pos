@@ -8,6 +8,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
@@ -53,7 +54,7 @@ object SyncManager {
      *
      * @param context Application context used to access [WorkManager].
      */
-    fun triggerImmediateSync(context: Context) {
+    fun triggerImmediateSync(context: Context): UUID {
         // Enforce network connection requirement for cloud synchronization
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -70,5 +71,6 @@ object SyncManager {
             ExistingWorkPolicy.REPLACE,
             immediateWorkRequest
         )
+        return immediateWorkRequest.id
     }
 }

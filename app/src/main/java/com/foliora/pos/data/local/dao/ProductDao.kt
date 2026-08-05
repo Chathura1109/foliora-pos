@@ -85,4 +85,10 @@ interface ProductDao {
      */
     @Query("SELECT * FROM products WHERE isSynced = 0")
     suspend fun getUnsyncedProducts(): List<ProductEntity>
+
+    @Query(
+        "SELECT COUNT(*) FROM products " +
+            "WHERE isSynced = 0 OR firebaseId IS NULL OR TRIM(firebaseId) = ''"
+    )
+    fun observePendingSyncCount(): Flow<Int>
 }

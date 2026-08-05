@@ -1,7 +1,10 @@
 package com.foliora.pos.ui.screens.sale
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.foliora.pos.data.local.entity.CustomerEntity
 import com.foliora.pos.data.local.entity.InventoryBatchEntity
 import com.foliora.pos.data.local.entity.ProductEntity
@@ -11,13 +14,21 @@ import com.foliora.pos.data.repository.CustomerRepository
 import com.foliora.pos.data.repository.InventoryBatchRepository
 import com.foliora.pos.data.repository.ProductRepository
 import com.foliora.pos.data.repository.SaleRepository
+import com.foliora.pos.data.repository.SettingRepository
 import com.foliora.pos.data.repository.UserRepository
+import com.foliora.pos.data.sync.SyncManager
+import com.foliora.pos.ui.receipt.ReceiptData
+import com.foliora.pos.ui.receipt.ReceiptLineItem
 import com.google.firebase.auth.FirebaseAuth
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -40,6 +51,12 @@ data class CartItem(
         get() = batch.sellingPrice * quantity
 }
 
+data class InventorySyncStatus(
+    val isInProgress: Boolean = false,
+    val message: String? = null,
+    val isError: Boolean = false
+)
+
 /**
  * ViewModel managing the point-of-sale checkout process in Foliora POS.
  * Connects the UI to [ProductRepository], [CustomerRepository], and [SaleRepository]
@@ -52,10 +69,12 @@ data class CartItem(
  */
 @HiltViewModel
 class NewSaleViewModel @Inject constructor(
+    @ApplicationContext private val applicationContext: Context,
     private val productRepository: ProductRepository,
     private val customerRepository: CustomerRepository,
     private val inventoryBatchRepository: InventoryBatchRepository,
     private val saleRepository: SaleRepository,
+    private val settingRepository: SettingRepository,
     private val userRepository: UserRepository
 ) : ViewModel() {
 
@@ -64,10 +83,76 @@ class NewSaleViewModel @Inject constructor(
     private val _currentUserRole = MutableStateFlow("CASHIER")
     val currentUserRole: StateFlow<String> = _currentUserRole.asStateFlow()
 
+    private val pendingInventorySync = combine(
+        productRepository.observePendingSyncCount(),
+        inventoryBatchRepository.observePendingSyncCount()
+    ) { productCount, batchCount ->
+        productCount > 0 || batchCount > 0
+    }
+
+    val hasPendingInventorySync: StateFlow<Boolean> = pendingInventorySync.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = true
+    )
+
+    private val _inventorySyncStatus = MutableStateFlow(InventorySyncStatus())
+    val inventorySyncStatus: StateFlow<InventorySyncStatus> = _inventorySyncStatus.asStateFlow()
+
+    private val _completedReceipt = MutableStateFlow<ReceiptData?>(null)
+    val completedReceipt: StateFlow<ReceiptData?> = _completedReceipt.asStateFlow()
+
     init {
         viewModelScope.launch {
             val firebaseUid = firebaseAuth.currentUser?.uid ?: return@launch
             _currentUserRole.value = userRepository.getUserByFirebaseUid(firebaseUid)?.role ?: "CASHIER"
+        }
+        // Refresh once whenever a new POS ViewModel is opened so cloud stock changes are pulled too.
+        syncInventory()
+    }
+
+    fun syncInventory() {
+        if (_inventorySyncStatus.value.isInProgress) return
+
+        val workId = SyncManager.triggerImmediateSync(applicationContext)
+        _inventorySyncStatus.value = InventorySyncStatus(
+            isInProgress = true,
+            message = "Waiting for internet connection..."
+        )
+
+        viewModelScope.launch {
+            WorkManager.getInstance(applicationContext)
+                .getWorkInfoByIdFlow(workId)
+                .filterNotNull()
+                .first { workInfo ->
+                    _inventorySyncStatus.value = when (workInfo.state) {
+                        WorkInfo.State.ENQUEUED,
+                        WorkInfo.State.BLOCKED -> InventorySyncStatus(
+                            isInProgress = true,
+                            message = if (workInfo.runAttemptCount > 0) {
+                                "Inventory sync will retry automatically..."
+                            } else {
+                                "Waiting for internet connection..."
+                            }
+                        )
+                        WorkInfo.State.RUNNING -> InventorySyncStatus(
+                            isInProgress = true,
+                            message = "Synchronising inventory..."
+                        )
+                        WorkInfo.State.SUCCEEDED -> InventorySyncStatus(
+                            message = "Inventory synchronised successfully."
+                        )
+                        WorkInfo.State.FAILED -> InventorySyncStatus(
+                            message = "Inventory sync failed. Please try again.",
+                            isError = true
+                        )
+                        WorkInfo.State.CANCELLED -> InventorySyncStatus(
+                            message = "Inventory sync was cancelled. Please try again.",
+                            isError = true
+                        )
+                    }
+                    workInfo.state.isFinished
+                }
         }
     }
 
@@ -271,19 +356,30 @@ class NewSaleViewModel @Inject constructor(
         _cartItems.value = emptyList()
     }
 
+    /** Removes the completed receipt after the cashier chooses Done. */
+    fun clearCompletedReceipt() {
+        _completedReceipt.value = null
+    }
+
     /**
      * Completes the checkout transaction:
      * 1. Validates that cart is not empty.
      * 2. Builds [SaleEntity] and maps cart items to [SaleItemEntity].
      * 3. Calls `saleRepository.completeSale` to persist transaction and deduct inventory stock.
-     * 4. Invokes [onSuccess] callback upon completion.
-     *
-     * @param onSuccess Callback triggered on successful database transaction.
+     * 4. Exposes a saved receipt snapshot for preview and printing.
      */
-    fun checkout(onSuccess: () -> Unit = {}) {
+    fun checkout() {
         val currentCart = _cartItems.value
         if (currentCart.isEmpty()) {
             _errorMessage.value = "Cart is empty. Please add items to checkout."
+            return
+        }
+        if (
+            hasPendingInventorySync.value ||
+            _inventorySyncStatus.value.isInProgress ||
+            _inventorySyncStatus.value.isError
+        ) {
+            _errorMessage.value = "Synchronise inventory successfully before checkout."
             return
         }
         if (!_isProcessing.compareAndSet(expect = false, update = true)) return
@@ -336,12 +432,40 @@ class NewSaleViewModel @Inject constructor(
                     )
                 }
 
-                saleRepository.completeSale(sale, items)
+                val completedSaleId = saleRepository.completeSale(sale, items).toInt()
+                val completedSale = checkNotNull(saleRepository.getSaleById(completedSaleId)) {
+                    "Completed sale could not be loaded for its receipt"
+                }
+                val completedItems = saleRepository.getItemsBySaleId(completedSaleId)
+                    .first { savedItems -> savedItems.isNotEmpty() }
+                val settings = settingRepository.getSettings()
+                val productNames = currentCart.associate { it.product.id to it.product.name }
 
-                // Reset cart state and notify caller of successful checkout
+                _completedReceipt.value = ReceiptData(
+                    saleId = completedSale.id,
+                    date = completedSale.date,
+                    shopName = settings?.shopName ?: "Foliora",
+                    shopAddress = settings?.address.orEmpty(),
+                    shopPhone = settings?.phoneNumber.orEmpty(),
+                    cashierName = cashier.name,
+                    customerName = _selectedCustomer.value?.name,
+                    paymentMethod = completedSale.paymentMethod,
+                    status = completedSale.status,
+                    items = completedItems.map { item ->
+                        ReceiptLineItem(
+                            productName = productNames[item.productId] ?: "Product #${item.productId}",
+                            quantity = item.quantity,
+                            sellingPrice = item.sellingPrice,
+                            subtotal = item.subtotal
+                        )
+                    },
+                    totalAmount = completedSale.totalAmount,
+                    receiptMessage = settings?.receiptMessage.orEmpty()
+                )
+
+                // Reset the cart only after the saved receipt snapshot has been prepared.
                 _cartItems.value = emptyList()
                 _isProcessing.value = false
-                onSuccess()
             } catch (e: Exception) {
                 _isProcessing.value = false
                 _errorMessage.value = e.localizedMessage ?: "Failed to process sale."

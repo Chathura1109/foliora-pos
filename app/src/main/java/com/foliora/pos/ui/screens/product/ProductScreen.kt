@@ -130,6 +130,8 @@ fun ProductScreen(
     val role by viewModel.currentUserRole.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isAdjustingStock by viewModel.isAdjustingStock.collectAsStateWithLifecycle()
+    val batchPriceEditState by viewModel.batchPriceEditState.collectAsStateWithLifecycle()
+    val isUpdatingBatchPrices by viewModel.isUpdatingBatchPrices.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(errorMessage) {
@@ -390,6 +392,10 @@ fun ProductScreen(
             product = product,
             batches = batchesByProduct[product.id].orEmpty(),
             showCostPrice = role == "OWNER",
+            onEditBatch = { batch ->
+                productForBatchDetails = null
+                viewModel.openBatchPriceEditor(batch)
+            },
             onDismiss = { productForBatchDetails = null }
         )
     }
@@ -413,6 +419,16 @@ fun ProductScreen(
             }
         )
     }
+
+    batchPriceEditState?.let { editState ->
+        BatchPriceEditDialog(
+            batch = editState.batch,
+            canEditUnitCost = editState.canEditUnitCost,
+            isSubmitting = isUpdatingBatchPrices,
+            onDismiss = viewModel::dismissBatchPriceEditor,
+            onConfirm = viewModel::updateBatchPrices
+        )
+    }
 }
 
 /**
@@ -432,6 +448,13 @@ private fun ProductItemCard(
     onAdjustStock: () -> Unit
 ) {
     val isLowStock = product.stockQuantity <= product.lowStockLimit
+    val activeBatches = remember(batches) { batches.filter { it.remainingQuantity > 0 } }
+    val sellingPriceRange = remember(activeBatches) {
+        formatBatchPriceRange(activeBatches.map { it.sellingPrice })
+    }
+    val costPriceRange = remember(activeBatches) {
+        formatBatchPriceRange(activeBatches.map { it.unitCost })
+    }
 
     val imageBitmap = rememberSampledImageBitmap(product.photoPath, 52.dp)
 
@@ -510,14 +533,14 @@ private fun ProductItemCard(
                 // Pricing Info
                 Column {
                     Text(
-                        text = String.format(Locale.getDefault(), "Selling: Rs.%.2f", product.sellingPrice),
+                        text = sellingPriceRange?.let { "Selling: $it" } ?: "Selling: No active batch",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     if (userRole == "OWNER") {
                         Text(
-                            text = String.format(Locale.getDefault(), "Cost: Rs.%.2f", product.buyingPrice),
+                            text = costPriceRange?.let { "Cost: $it" } ?: "Cost: No active batch",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -744,6 +767,7 @@ private fun ProductBatchesDialog(
     product: ProductEntity,
     batches: List<InventoryBatchEntity>,
     showCostPrice: Boolean,
+    onEditBatch: (InventoryBatchEntity) -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -806,6 +830,20 @@ private fun ProductBatchesDialog(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.outline
                                 )
+                                if (showCostPrice && batch.remainingQuantity > 0) {
+                                    TextButton(
+                                        onClick = { onEditBatch(batch) },
+                                        modifier = Modifier.align(Alignment.End)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Edit Prices")
+                                    }
+                                }
                             }
                         }
                     }
@@ -818,6 +856,98 @@ private fun ProductBatchesDialog(
             }
         }
     )
+}
+
+@Composable
+private fun BatchPriceEditDialog(
+    batch: InventoryBatchEntity,
+    canEditUnitCost: Boolean,
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (unitCost: Double, sellingPrice: Double) -> Unit
+) {
+    var unitCostText by remember(batch.id) { mutableStateOf(batch.unitCost.toString()) }
+    var sellingPriceText by remember(batch.id) { mutableStateOf(batch.sellingPrice.toString()) }
+    var validationMessage by remember(batch.id) { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit Batch #${batch.id} Prices") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "These prices apply only to future sales from the remaining ${batch.remainingQuantity} units.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                OutlinedTextField(
+                    value = unitCostText,
+                    onValueChange = { if (canEditUnitCost) unitCostText = it },
+                    label = { Text("Unit Cost (Rs.)") },
+                    readOnly = !canEditUnitCost,
+                    enabled = !isSubmitting,
+                    supportingText = if (!canEditUnitCost) {
+                        { Text("Locked because this batch has already been used in a sale.") }
+                    } else {
+                        null
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = sellingPriceText,
+                    onValueChange = { sellingPriceText = it },
+                    label = { Text("Selling Price (Rs.)") },
+                    enabled = !isSubmitting,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Text(
+                    "Change quantities using Adjust Stock. Previous sales and profit remain unchanged.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                validationMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !isSubmitting,
+                onClick = {
+                    val unitCost = unitCostText.toDoubleOrNull()
+                    val sellingPrice = sellingPriceText.toDoubleOrNull()
+                    validationMessage = when {
+                        unitCost == null || !unitCost.isFinite() || unitCost < 0 ->
+                            "Enter a valid non-negative unit cost."
+                        sellingPrice == null || !sellingPrice.isFinite() || sellingPrice < 0 ->
+                            "Enter a valid non-negative selling price."
+                        else -> null
+                    }
+                    if (validationMessage == null && unitCost != null && sellingPrice != null) {
+                        onConfirm(unitCost, sellingPrice)
+                    }
+                }
+            ) {
+                Text(if (isSubmitting) "Saving..." else "Save Prices")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isSubmitting) { Text("Cancel") }
+        }
+    )
+}
+
+private fun formatBatchPriceRange(prices: List<Double>): String? {
+    val validPrices = prices.filter { it.isFinite() && it >= 0 }
+    if (validPrices.isEmpty()) return null
+    val minimum = validPrices.min()
+    val maximum = validPrices.max()
+    return if (minimum == maximum) {
+        String.format(Locale.getDefault(), "Rs.%.2f", minimum)
+    } else {
+        String.format(Locale.getDefault(), "Rs.%.2f – Rs.%.2f", minimum, maximum)
+    }
 }
 
 /**
@@ -1088,27 +1218,43 @@ private fun AddEditProductDialog(
                         }
                     }
 
-                    // Prices Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = buyingPriceText,
-                            onValueChange = { buyingPriceText = it },
-                            label = { Text("Buying Price *") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier.weight(1f),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
-                            value = sellingPriceText,
-                            onValueChange = { sellingPriceText = it },
-                            label = { Text("Selling Price *") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier.weight(1f),
-                            singleLine = true
-                        )
+                    if (product == null) {
+                        // Prices entered during creation belong to the opening batch.
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = buyingPriceText,
+                                onValueChange = { buyingPriceText = it },
+                                label = { Text("Opening Batch Cost *") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = sellingPriceText,
+                                onValueChange = { sellingPriceText = it },
+                                label = { Text("Opening Selling Price *") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+                    } else {
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Prices are managed separately for each stock batch. Use View Batches → Edit Prices.",
+                                modifier = Modifier.padding(12.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
                     }
 
                     // Stock & Unit Row
@@ -1199,8 +1345,16 @@ private fun AddEditProductDialog(
                         onClick = {
                             // Validation
                             val category = selectedCategory
-                            val buyingPrice = buyingPriceText.toDoubleOrNull()
-                            val sellingPrice = sellingPriceText.toDoubleOrNull()
+                            val buyingPrice = if (product == null) {
+                                buyingPriceText.toDoubleOrNull()
+                            } else {
+                                product.buyingPrice
+                            }
+                            val sellingPrice = if (product == null) {
+                                sellingPriceText.toDoubleOrNull()
+                            } else {
+                                product.sellingPrice
+                            }
                             val stock = if (product == null) {
                                 stockText.toDoubleOrNull()
                             } else {

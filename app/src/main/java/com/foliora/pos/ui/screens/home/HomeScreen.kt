@@ -75,7 +75,7 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(BackgroundLight)
+                .background(MaterialTheme.colorScheme.background)
         ) {
             when (currentTab) {
                 "home" -> {
@@ -208,7 +208,7 @@ fun AdminDashboard(
                     unit = product.unit,
                     onClick = { onNavigate(Screen.Products.route) }
                 )
-                HorizontalDivider(color = PrimaryContainer)
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item { Spacer(modifier = Modifier.height(24.dp)) }
         }
@@ -226,7 +226,7 @@ fun AdminDashboard(
                     status = sale.status,
                     onClick = { onNavigate(Screen.Sales.route) }
                 )
-                HorizontalDivider(color = PrimaryContainer)
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
     }
@@ -298,7 +298,7 @@ fun CashierDashboard(
                     unit = product.unit,
                     onClick = { onNavigate(Screen.Products.route) }
                 )
-                HorizontalDivider(color = PrimaryContainer)
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item { Spacer(modifier = Modifier.height(24.dp)) }
         }
@@ -316,7 +316,7 @@ fun CashierDashboard(
                     status = sale.status,
                     onClick = { onNavigate(Screen.Sales.route) }
                 )
-                HorizontalDivider(color = PrimaryContainer)
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
     }
@@ -330,12 +330,12 @@ fun DashboardHeader(role: String) {
             text = "Welcome back, $role!",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
-            color = PrimaryGreen
+            color = MaterialTheme.colorScheme.primary
         )
         Text(
             text = dateStr,
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -357,7 +357,7 @@ fun SectionHeader(title: String, onSeeAll: () -> Unit) {
         Text(
             text = "See All",
             style = MaterialTheme.typography.labelLarge,
-            color = PrimaryGreen,
+            color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.clickable { onSeeAll() }
         )
     }
@@ -404,7 +404,9 @@ fun MoreScreen(onNavigate: (String) -> Unit, onLogout: () -> Unit, role: String)
                             }
                         },
                     elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceWhite)
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
                 ) {
                     Row(
                         modifier = Modifier
@@ -417,12 +419,20 @@ fun MoreScreen(onNavigate: (String) -> Unit, onLogout: () -> Unit, role: String)
                             text = item.first,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Medium,
-                            color = if (item.first == "Logout") ErrorRed else TextPrimary
+                            color = if (item.first == "Logout") {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            }
                         )
                         Icon(
                             imageVector = Icons.Default.ChevronRight,
                             contentDescription = null,
-                            tint = if (item.first == "Logout") ErrorRed else TextSecondary
+                            tint = if (item.first == "Logout") {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                     }
                 }
