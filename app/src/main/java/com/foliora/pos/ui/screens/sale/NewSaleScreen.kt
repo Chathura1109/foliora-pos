@@ -225,7 +225,7 @@ fun NewSaleScreenContent(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1.1f)
+                    .weight(0.8f)
                     .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                     .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
@@ -335,7 +335,7 @@ fun NewSaleScreenContent(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .weight(1.2f)
                     .padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
                 // Customer & Payment Selector Row

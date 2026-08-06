@@ -52,9 +52,16 @@ class SettingRepository @Inject constructor(
         return if (existingSettings != null) {
             existingSettings
         } else {
-            val defaultSettings = SettingEntity()
+            val defaultSettings = SettingEntity(
+                isSynced = true,
+                firebaseId = SETTINGS_DOCUMENT_ID
+            )
             val id = settingDao.insertSetting(defaultSettings)
             defaultSettings.copy(id = id.toInt())
         }
+    }
+
+    private companion object {
+        private const val SETTINGS_DOCUMENT_ID = "shop"
     }
 }

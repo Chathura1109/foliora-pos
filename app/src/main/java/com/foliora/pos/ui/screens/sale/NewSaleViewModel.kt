@@ -433,6 +433,7 @@ class NewSaleViewModel @Inject constructor(
                 }
 
                 val completedSaleId = saleRepository.completeSale(sale, items).toInt()
+                SyncManager.triggerImmediateSync(applicationContext)
                 val completedSale = checkNotNull(saleRepository.getSaleById(completedSaleId)) {
                     "Completed sale could not be loaded for its receipt"
                 }
