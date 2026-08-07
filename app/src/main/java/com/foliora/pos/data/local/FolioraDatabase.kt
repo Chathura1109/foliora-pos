@@ -8,7 +8,7 @@ import com.foliora.pos.data.local.entity.*
 /**
  * The central Room database for the entire Foliora POS app.
  *
- * HOW ROOM WORKS (for your viva):
+ * HOW ROOM WORKS:
  * Room is a wrapper around SQLite that lets you define tables as Kotlin data classes
  * (Entities) and queries as interface methods (DAOs). At compile time, Room uses KSP
  * to auto-generate all the actual SQL and database boilerplate code.
